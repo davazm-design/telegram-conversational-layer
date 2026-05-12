@@ -239,7 +239,7 @@ describe('Capabilities Fase 3 — add/list/cancel', () => {
     await adapter.receive('/recordar en 2h estirar');
     adapter.reset();
     await adapter.receive('/recordatorios');
-    expect(lastReply()).toContain('Recordatorios pendientes');
+    expect(lastReply()).toMatch(/recordatorios pendientes/i);
     expect(lastReply()).toContain('Tomar agua');
     expect(lastReply()).toContain('Estirar');
   });
@@ -291,7 +291,7 @@ describe('Capabilities Fase 3 — add/list/cancel', () => {
     adapter.reset();
     await adapter.receive('/recordatorios');
     expect(lastReply()).toContain('Llamar al doctor');
-    expect(lastReply()).toMatch(/Recordatorios pendientes/);
+    expect(lastReply()).toMatch(/recordatorios pendientes/i);
   });
 
   test('regresión: /cancel limpia draft y /recordatorios vuelve a responder', async () => {
@@ -305,7 +305,7 @@ describe('Capabilities Fase 3 — add/list/cancel', () => {
     // igualmente porque el draft no bloquea slash commands.
     adapter.reset();
     await adapter.receive('/recordatorios');
-    expect(lastReply()).toMatch(/Recordatorios pendientes|No tienes recordatorios/);
+    expect(lastReply()).toMatch(/recordatorios pendientes|No tienes recordatorios/i);
   });
 
   test('regresión: slash commands tienen prioridad sobre draft pendiente', async () => {
@@ -318,7 +318,7 @@ describe('Capabilities Fase 3 — add/list/cancel', () => {
     await adapter.receive('/recordatorios');
     // El draft sigue ahí (no se ha completado), pero /recordatorios
     // debe responder. La lista estará vacía (aún no se creó el recordatorio).
-    expect(lastReply()).toMatch(/Recordatorios pendientes|No tienes recordatorios/);
+    expect(lastReply()).toMatch(/recordatorios pendientes|No tienes recordatorios/i);
   });
 
   test('regresión: pending_input persistido NO traga slash commands', async () => {
@@ -334,7 +334,7 @@ describe('Capabilities Fase 3 — add/list/cancel', () => {
     await adapter.receive('/recordatorios');
     // Debe responder como list_reminders, NO como add_micro_task con
     // text="/recordatorios".
-    expect(lastReply()).toMatch(/No tienes recordatorios|Recordatorios pendientes/);
+    expect(lastReply()).toMatch(/No tienes recordatorios|recordatorios pendientes/i);
 
     // El pending_input debe quedar limpio tras el escape.
     const pi = await storage.sessionStore.getPendingInput(user);
@@ -356,6 +356,98 @@ describe('Capabilities Fase 3 — add/list/cancel', () => {
 
     const pi = await storage.sessionStore.getPendingInput(user);
     expect(pi).toBeNull();
+  });
+
+  // ─── Regresión producción: /recordatorios mudo cuando hay pendientes ──
+  // Causa raíz: legacy Markdown rompía con "_Cancela uno con /cancelar_recordatorio_"
+  // (underscore del slash command rompe pareo de cursiva). El adapter de
+  // Telegram tragaba el HTTP 400 silenciosamente. Fix: salida sin markdown
+  // riesgoso + escape defensivo + try/catch.
+
+  test('regresión prod: /recordar + hora → /privacidad cuenta > 0 → /recordatorios lista', async () => {
+    await adapter.receive('/recordar mañana llamar al doctor');
+    expect(lastReply()).toMatch(/A qué hora mañana/i);
+    adapter.reset();
+    await adapter.receive('9');
+    expect(lastReply()).toMatch(/Te recuerdo "Llamar al doctor"/);
+
+    // /privacidad refleja el conteo
+    adapter.reset();
+    await adapter.receive('/privacidad');
+    expect(lastReply()).toMatch(/Recordatorios programados: 1 pendiente/);
+
+    // /recordatorios SÍ responde con id + texto + fecha
+    adapter.reset();
+    await adapter.receive('/recordatorios');
+    const r = lastReply();
+    expect(r).toMatch(/Tus recordatorios pendientes/);
+    expect(r).toContain('1.');
+    expect(r).toContain('Llamar al doctor');
+    // Fecha local renderizada (no la cadena "fecha no disponible")
+    expect(r).not.toContain('fecha no disponible');
+    // Salida sin markdown riesgoso que rompa Telegram
+    expect(r).not.toContain('*');
+    expect(r).not.toMatch(/(^|[^\\])_/m); // sin underscores sin escapar
+  });
+
+  test('regresión prod: 2 recordatorios pendientes → /recordatorios lista ambos', async () => {
+    await adapter.receive('/recordar en 1h tomar agua');
+    await adapter.receive('/recordar en 2h estirar');
+    adapter.reset();
+    await adapter.receive('/recordatorios');
+    const r = lastReply();
+    expect(r).toMatch(/Tus recordatorios pendientes/);
+    expect(r).toContain('1.');
+    expect(r).toContain('2.');
+    expect(r).toContain('Tomar agua');
+    expect(r).toContain('Estirar');
+  });
+
+  test('regresión prod: dueAt inválido/null → "fecha no disponible", no se queda mudo', async () => {
+    // Sembramos directamente un recordatorio con dueAt corrupto, saltándonos
+    // el handler para simular datos en mal estado en producción.
+    await storage.adhdCoachStore.addReminder(user, 'Reminder bueno', new Date(Date.now() + 3600_000).toISOString());
+    // Inyectar uno corrupto via API interna del Map (workaround para test)
+    // Como Memory store no expone setter para date inválido, manipulamos via
+    // un store wrapper: aquí usamos un trick simple — corromper el ISO
+    // pasando una cadena obviamente inválida.
+    await storage.adhdCoachStore.addReminder(user, 'Reminder roto', 'no-es-fecha');
+
+    adapter.reset();
+    await adapter.receive('/recordatorios');
+    const r = lastReply();
+    expect(r).toMatch(/Tus recordatorios pendientes/);
+    expect(r).toContain('Reminder bueno');
+    expect(r).toContain('Reminder roto');
+    expect(r).toContain('fecha no disponible');
+  });
+
+  test('regresión prod: si store.listReminders lanza, responde mensaje claro (no mudo)', async () => {
+    // Reemplazamos temporalmente listReminders por una versión que lanza.
+    const origList = storage.adhdCoachStore.listReminders.bind(storage.adhdCoachStore);
+    (storage.adhdCoachStore as { listReminders: typeof origList }).listReminders =
+      (async () => { throw new Error('boom'); }) as typeof origList;
+
+    try {
+      adapter.reset();
+      await adapter.receive('/recordatorios');
+      expect(lastReply()).toMatch(/No pude listar tus recordatorios/);
+    } finally {
+      (storage.adhdCoachStore as { listReminders: typeof origList }).listReminders = origList;
+    }
+  });
+
+  test('regresión prod: texto con underscores se escapa y NO rompe el render', async () => {
+    // Caso clásico de Markdown v1 roto: texto con un solo underscore.
+    await storage.adhdCoachStore.addReminder(user, 'maria_perez confirmar', new Date(Date.now() + 3600_000).toISOString());
+
+    adapter.reset();
+    await adapter.receive('/recordatorios');
+    const r = lastReply();
+    expect(r).toMatch(/Tus recordatorios pendientes/);
+    // El texto del usuario aparece, con su underscore escapado para
+    // sobrevivir a Markdown v1.
+    expect(r).toMatch(/maria\\_perez confirmar/);
   });
 });
 

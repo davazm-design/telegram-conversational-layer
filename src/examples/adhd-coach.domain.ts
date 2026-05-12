@@ -247,6 +247,43 @@ function formatHasta(iso: string): string {
   return iso.replace('T', ' ').slice(0, 16);
 }
 
+/**
+ * Formato local robusto para mostrar al usuario en el chat.
+ * - Acepta null/undefined/string vacío → "fecha no disponible".
+ * - Si el string no parsea a Date válido → "fecha no disponible".
+ * - Locale/timezone por env (REMINDER_LOCALE, REMINDER_TZ).
+ *   Default razonable para uso personal en MX: es-MX, America/Mexico_City.
+ */
+export function formatLocalDateTime(iso: string | null | undefined): string {
+  if (!iso || typeof iso !== 'string') return 'fecha no disponible';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return 'fecha no disponible';
+  try {
+    const locale = process.env.REMINDER_LOCALE || 'es-MX';
+    const tz = process.env.REMINDER_TZ || 'America/Mexico_City';
+    return d.toLocaleString(locale, {
+      timeZone: tz,
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', hour12: false,
+    });
+  } catch {
+    // Fallback determinista si Intl/timezone fallan en el runtime.
+    return iso.replace('T', ' ').slice(0, 16);
+  }
+}
+
+/**
+ * Escapa caracteres especiales de Telegram Markdown v1 (`_*` `[).
+ * Necesario porque el adapter envía con parseMode='Markdown' y un
+ * caracter sin pareja en el texto del usuario (o en un slash command con
+ * `_` como `/cancelar_recordatorio`) hace que Telegram rechace el mensaje
+ * con HTTP 400 y el adapter se lo come silenciosamente.
+ */
+export function escapeMdV1(s: string): string {
+  if (s === null || s === undefined) return '';
+  return String(s).replace(/([_*`\[])/g, '\\$1');
+}
+
 // ─── Domain Handler ─────────────────────────────────────────────────────────
 
 export class AdhdCoachDomainHandler implements IDomainHandler {
@@ -959,19 +996,33 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
   }
 
   private async listReminders(userId: string): Promise<ActionResult> {
-    const list = await this.store.listReminders(userId);
-    if (list.length === 0) {
+    // Robusto contra: pendientes con date null/invalida, text vacio,
+    // caracteres que rompan Markdown v1 (Telegram rechaza el mensaje y el
+    // adapter se lo come), y cualquier excepcion del store.
+    try {
+      const list = await this.store.listReminders(userId);
+      if (!list || list.length === 0) {
+        return {
+          success: true,
+          message: '🗒️ No tienes recordatorios pendientes. Crea uno con /recordar.',
+        };
+      }
+      const lines: string[] = ['Tus recordatorios pendientes:'];
+      list.forEach((r, i) => {
+        const rawText = (r?.text && String(r.text).trim()) ? String(r.text).trim() : '(sin texto)';
+        const safeText = escapeMdV1(rawText);
+        const when = formatLocalDateTime(r?.dueAt);
+        lines.push(`${i + 1}. ${safeText} — ${when}`);
+      });
+      return { success: true, message: lines.join('\n') };
+    } catch (err) {
+      // No relanzamos para no caer al "Ocurrio un error inesperado" generico;
+      // el orquestador NO ve la excepcion porque damos respuesta de fallback.
       return {
-        success: true,
-        message: '🗒️ No tienes recordatorios pendientes. Crea uno con /recordar.',
+        success: false,
+        message: 'No pude listar tus recordatorios ahora. Intenta de nuevo en un momento.',
       };
     }
-    const lines: string[] = ['🗒️ *Recordatorios pendientes:*', ''];
-    list.forEach((r, i) => {
-      lines.push(`  ${i + 1}. ${r.text} — ${formatHasta(r.dueAt)}`);
-    });
-    lines.push('', '_Cancela uno con `/cancelar_recordatorio <número>`._');
-    return { success: true, message: lines.join('\n') };
   }
 
   private async cancelReminder(userId: string, params: Record<string, unknown>): Promise<ActionResult> {
