@@ -32,6 +32,43 @@ Telegram message
 
 ---
 
+## Separación entre base y dominios
+
+Esta capa está pensada para ser **reusable**: el código base no debe acoplarse a ningún proyecto concreto. La frontera es clara y debe mantenerse:
+
+- **Core (reusable, agnóstico al dominio)**:
+  - `src/adapter/` — transporte (Telegram, consola, …).
+  - `src/core/` — types, config, logger, session manager, response formatter, storage interfaces.
+  - `src/registry/` — registro genérico de capabilities.
+  - `src/router/` — routing híbrido (comando → regla → LLM).
+  - `src/security/` — policy engine y pre-filtros transversales (p.ej. `crisis.detector.ts`).
+  - `src/llm/` — fallback LLM.
+  - `src/index.ts` — orchestrator agnóstico al dominio.
+
+- **Dominios (específicos del proyecto)**: viven en `src/examples/<nombre>.domain.ts` (o `src/domains/<nombre>/...` si se requiere más estructura). Implementan `IDomainHandler`. Cada dominio decide sus capabilities, comandos, reglas y storage propio. **El core no importa nada de aquí.**
+
+- **Una instancia Railway por dominio**: el dominio activo se elige con la variable de entorno `DOMAIN` (ej. `DOMAIN=todo` o `DOMAIN=adhd-coach`). No hay `/domains`, no hay `/use`, no hay multi-tenant dentro del chat.
+
+Reglas para extender:
+
+| ¿Quieres añadir esto…? | ¿Dónde vive? |
+|---|---|
+| Una nueva capability útil solo en tu proyecto | dentro de tu `*.domain.ts` |
+| Un comando slash propio | `getCommands()` de tu dominio |
+| Una regla regex de lenguaje natural | `getRules()` de tu dominio |
+| Un nuevo dominio completo | nuevo archivo + entrada en `getDomainRegistry()` |
+| Una nueva capa de seguridad transversal (aplica a todos los dominios) | `src/security/` con interfaz agnóstica |
+| Un nuevo transporte (WhatsApp, Slack, web, …) | nuevo adapter en `src/adapter/` que implemente `IMessageAdapter` |
+| Una nueva forma de persistencia | nueva clase en `src/core/storage/` que implemente `IStorageProvider` |
+
+**Lo que no debe pasar:**
+
+- El core no puede importar nada de `src/examples/` ni del dominio activo.
+- Los nombres de funciones/clases del core no deben mencionar dominios concretos (ej. evita `getAdhdContext`; prefiere `getDomainContext`).
+- Si un pre-filtro de seguridad es transversal pero su contenido es localizable (keywords por idioma, recursos por país, etc.), debe permitir inyección/desactivación por constructor sin tocar el core.
+
+Esta sección es la regla operativa para mantener `telegram-conversational-layer` como base limpia y reusable.
+
 ## Inicio Rápido
 
 ### 1. Instalar
@@ -128,6 +165,11 @@ Este proyecto está diseñado para correr como "Nivel 1": una instancia por domi
 8. **Probar /health:** Entra a `https://tu-proyecto.up.railway.app/health` en tu navegador. Debería responder `OK`. El token y el secret de webhook nunca se exponen aquí.
 9. **Probar Telegram:** Ve a tu bot en Telegram y envía `/start` para confirmar la conexión.
 10. **Revisar logs:** Revisa la pestaña *Deployments* -> *View Logs* para ver mensajes de inicio o depurar errores. Los secretos NO se imprimen en consola.
+
+> **⚠️ Nota Operativa Importante para Railway:**
+> - Si Railway muestra *"Application failed to respond"* pero los logs indican *"Express server listening on port 8080"*, revisa en **Settings → Networking** de tu servicio y asegúrate de que el **Target Port** público coincida (ej. `8080`).
+> - El health check correcto es **siempre**: `GET /health` → responde `OK`.
+> - `PUBLIC_WEBHOOK_URL` debe ser siempre la URL pública **base**, sin `/webhook` y sin `/health` al final (ej. `https://mi-app.up.railway.app`).
 
 ### Cómo duplicar el servicio para adhd-coach:
 

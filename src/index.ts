@@ -28,6 +28,7 @@ import { OpenAIProvider } from './llm/openai.provider';
 import { ResponseFormatter } from './core/response.formatter';
 import { TelegramAdapter } from './adapter/telegram.adapter';
 import { logger, setLogLevel } from './core/logger';
+import { CrisisDetector, CRISIS_FIXED_MESSAGE } from './security/crisis.detector';
 
 const COMPONENT = 'Orchestrator';
 
@@ -40,6 +41,7 @@ export class Orchestrator {
   private router: IntentRouter;
   private policy: PolicyEngine;
   private formatter: ResponseFormatter;
+  private crisisDetector: CrisisDetector;
   private domainName: string = 'Asistente';
 
   constructor(
@@ -47,12 +49,17 @@ export class Orchestrator {
     domainHandler: IDomainHandler,
     config: AppConfig,
     sessionStore: ISessionStore,
+    // Pre-filtro transversal de seguridad. Por defecto se construye uno
+    // genérico (CrisisDetector con keywords ES). Pasar una instancia propia
+    // permite localización / desactivación futura sin tocar core.
+    crisisDetector: CrisisDetector = new CrisisDetector(),
   ) {
     this.adapter = adapter;
     this.sessions = new SessionManager(sessionStore);
     this.registry = new CapabilityRegistry();
     this.policy = new PolicyEngine();
     this.formatter = new ResponseFormatter();
+    this.crisisDetector = crisisDetector;
     this.domainName = domainHandler.domainName;
 
     // Register domain capabilities
@@ -99,6 +106,21 @@ export class Orchestrator {
 
   private async handleMessage(msg: GenericMessage): Promise<void> {
     try {
+      // ── Step -1: A5 Crisis pre-filter (system-wide, all domains) ────────
+      // Se ejecuta ANTES de cualquier otro paso. Si dispara:
+      //   - limpia pending_input y pending_action
+      //   - emite el mensaje fijo de derivación
+      //   - NO pasa por router, policy, domain handler ni LLM
+      //   - NO se registra el contenido del mensaje (solo userId + flag)
+      if (this.crisisDetector.isCrisis(msg.text)) {
+        await this.sessions.clearContext(msg.userId, 'pending_input');
+        await this.sessions.clearPendingAction(msg.userId);
+        logger.warn(COMPONENT, 'Crisis pre-filter triggered; routing skipped', {
+          userId: msg.userId,
+        });
+        return this.respond(msg.chatId, CRISIS_FIXED_MESSAGE);
+      }
+
       // ── Step 0: Check for pending input ──────────────────────────────────
       // If the user has a pending_input, the NEXT message is treated as the missing parameter.
       // Exception: /cancel clears pending_input.
