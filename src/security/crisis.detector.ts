@@ -125,12 +125,28 @@ export class CrisisDetector {
   /**
    * Devuelve true si el texto contiene cualquiera de las palabras clave
    * después de normalizar (lowercase + sin acentos + trim).
+   *
+   * Caso especial — keywords que empiezan por `/` (slash commands): se
+   * matchean SOLO como token completo (todo el texto o seguido de espacio),
+   * para evitar falsos positivos como "/crisis_recursos" disparando "/crisis".
+   * Las keywords normales se matchean por substring (regla "si hay duda,
+   * gana A5"); esto solo afecta a comandos slash explícitos.
    */
   isCrisis(text: string): boolean {
     if (!text || typeof text !== 'string') return false;
     const norm = normalizeForMatching(text);
     if (!norm) return false;
-    return this.keywords.some((kw) => kw.length > 0 && norm.includes(kw));
+    for (const kw of this.keywords) {
+      if (!kw) continue;
+      if (kw.startsWith('/')) {
+        // Slash command: token completo o seguido de espacio + args.
+        // NO matchea si va seguido de cualquier otro carácter (a-z, 0-9, _).
+        if (norm === kw || norm.startsWith(kw + ' ')) return true;
+      } else {
+        if (norm.includes(kw)) return true;
+      }
+    }
+    return false;
   }
 
   /** Para tests: devuelve la cantidad de keywords activas. */

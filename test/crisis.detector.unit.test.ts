@@ -55,6 +55,18 @@ describe('CrisisDetector — unit (transversal, sin dominio)', () => {
     expect(detector.isCrisis('/crisis')).toBe(true);
   });
 
+  test('comando /crisis con args → crisis', () => {
+    expect(detector.isCrisis('/crisis ayuda')).toBe(true);
+  });
+
+  test('"/crisis_recursos" NO dispara crisis (no es el comando /crisis)', () => {
+    expect(detector.isCrisis('/crisis_recursos')).toBe(false);
+  });
+
+  test('"/crisisanything" NO dispara crisis', () => {
+    expect(detector.isCrisis('/crisisanything')).toBe(false);
+  });
+
   // ── Negativos: NO deben disparar crisis ───────────────────────────────────
   test('"me rindo con esta tarea" → NO crisis', () => {
     expect(detector.isCrisis('me rindo con esta tarea')).toBe(false);

@@ -231,6 +231,15 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
         riskLevel: RiskLevel.LOW_RISK_WRITE,
         requiresConfirmation: false,
       },
+      {
+        // Solo derivación. NO sustituye al crisis pre-filter global —
+        // el pre-filter sigue respondiendo PRIMERO a frases de riesgo.
+        name: 'show_crisis_resources',
+        description: 'Muestra líneas de crisis y emergencias por país',
+        parameters: {},
+        riskLevel: RiskLevel.READ_ONLY,
+        requiresConfirmation: false,
+      },
     ];
   }
 
@@ -244,6 +253,9 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
       '/abandonar': 'anti_abandono',
       '/reinicio': 'restart_no_guilt',
       '/agenda': 'agenda_start',
+      // Recursos de crisis (READ_ONLY, derivación)
+      '/recursos': 'show_crisis_resources',
+      '/crisis_recursos': 'show_crisis_resources',
       // NOTA: /silencio no se mapea aquí porque la rule captura su duración opcional.
     };
   }
@@ -349,6 +361,20 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
         action: 'agenda_classify',
         extractParams: (_match, _normalized, rawText) => ({ dump: rawText }),
       },
+
+      // ── Fase 2 — Recursos de crisis (READ_ONLY, derivación) ──────────────
+      // NOTA: NO incluye frases de riesgo ("no quiero seguir", "quiero morir",
+      // etc.) — esas las captura el pre-filter global ANTES de llegar aquí.
+      // Solo se activa con peticiones explícitas de información de recursos.
+      {
+        patterns: [
+          /^(recursos|recursos de crisis|recursos de apoyo|recursos de emergencia)$/,
+          /^(linea de crisis|lineas de crisis|línea de crisis|líneas de crisis)$/,
+          /^(emergencias|telefono de emergencias|teléfonos de emergencia|numero de emergencia|número de emergencia)$/,
+          /^(donde pido ayuda|donde llamar|a quien llamo)$/,
+        ],
+        action: 'show_crisis_resources',
+      },
     ];
   }
 
@@ -381,6 +407,8 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
         return this.agendaStart();
       case 'agenda_classify':
         return await this.agendaClassify(userId, params);
+      case 'show_crisis_resources':
+        return this.showCrisisResources();
       default:
         return { success: false, message: `Acción "${action}" no implementada en ADHD Coach.` };
     }
@@ -640,5 +668,20 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
     lines.push('¿Eliges 3 importantes y 1 de mantenimiento para hoy?');
 
     return { success: true, message: lines.join('\n') };
+  }
+
+  private showCrisisResources(): ActionResult {
+    // Mínimo: MX, US, ES. Ampliar con un mantenedor humano antes de exponer
+    // el bot fuera de tu uso personal. Los números deben revisarse al menos
+    // anualmente; cambian con frecuencia.
+    const message = [
+      'Recursos de apoyo:',
+      '- México: Línea de la Vida 800 911 2000. Emergencias: 911.',
+      '- Estados Unidos: 988 Suicide & Crisis Lifeline. Emergencias: 911.',
+      '- España: Línea 024 de atención a la conducta suicida. Emergencias: 112.',
+      '',
+      'Si estás en peligro inmediato, contacta emergencias ahora.',
+    ].join('\n');
+    return { success: true, message };
   }
 }

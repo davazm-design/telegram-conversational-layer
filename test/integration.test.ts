@@ -340,9 +340,9 @@ describe('Domain Handler — ADHD Coach', () => {
     expect(adhdDomain.domainName).toBe('ADHD Coach');
   });
 
-  test('has 13 capabilities (6 originales + 7 de fase 2)', () => {
+  test('has 14 capabilities (6 originales + 7 de fase 2 + recursos)', () => {
     const caps = adhdDomain.getCapabilities();
-    expect(caps.length).toBe(13);
+    expect(caps.length).toBe(14);
     // Originales
     expect(caps.find(c => c.name === 'daily_checkin')).toBeDefined();
     expect(caps.find(c => c.name === 'list_today_focus')).toBeDefined();
@@ -358,6 +358,8 @@ describe('Domain Handler — ADHD Coach', () => {
     expect(caps.find(c => c.name === 'restart_no_guilt')).toBeDefined();
     expect(caps.find(c => c.name === 'agenda_start')).toBeDefined();
     expect(caps.find(c => c.name === 'agenda_classify')).toBeDefined();
+    // Recursos
+    expect(caps.find(c => c.name === 'show_crisis_resources')).toBeDefined();
   });
 
   test('daily_checkin works', async () => {
