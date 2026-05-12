@@ -133,26 +133,43 @@ export class Orchestrator {
 
       // ── Step 0: Check for pending input ──────────────────────────────────
       // If the user has a pending_input, the NEXT message is treated as the missing parameter.
-      // Exception: /cancel clears pending_input.
+      // Exceptions (escape hatches): /cancel, "cancelar", o CUALQUIER slash command.
+      //
+      // Rationale: si el usuario escribe /algo, claramente quiere ejecutar un
+      // comando, no entregar texto al flujo pendiente. Sin esta excepción, un
+      // pending_input persistido (p.ej. en Postgres, sobreviviente a reinicios)
+      // se tragaba slash commands posteriores y dejaba al bot mudo.
       const pendingInput = await this.sessions.getContext(msg.userId, 'pending_input') as PendingInput | undefined;
       if (pendingInput) {
         const rawText = msg.text.trim();
+        const lower = rawText.toLowerCase();
+        const isSlashCommand = rawText.startsWith('/');
 
         // Allow /cancel and "cancelar" to break out of pending input
-        if (rawText.toLowerCase() === '/cancel' || rawText.toLowerCase() === 'cancelar') {
+        if (lower === '/cancel' || lower === 'cancelar') {
           await this.sessions.clearContext(msg.userId, 'pending_input');
           return this.respond(msg.chatId, '✅ Acción cancelada.');
         }
 
-        // Use raw text as the parameter value (preserve original casing/accents for task text)
-        const params: Record<string, unknown> = { [pendingInput.paramName]: rawText };
+        // Any slash command escapes pending_input: clear it and fall through
+        // to normal routing so the command runs as usual.
+        if (isSlashCommand) {
+          await this.sessions.clearContext(msg.userId, 'pending_input');
+          logger.info(COMPONENT, 'pending_input cleared by slash command escape', {
+            userId: msg.userId, command: rawText.split(' ')[0],
+          });
+          // Fall through — no return — para que la pipeline procese el comando.
+        } else {
+          // Use raw text as the parameter value (preserve original casing/accents for task text)
+          const params: Record<string, unknown> = { [pendingInput.paramName]: rawText };
 
-        // Clear pending input BEFORE executing (to prevent loops)
-        await this.sessions.clearContext(msg.userId, 'pending_input');
+          // Clear pending input BEFORE executing (to prevent loops)
+          await this.sessions.clearContext(msg.userId, 'pending_input');
 
-        // Execute the action
-        const result = await this.registry.executeAction(pendingInput.action, params, msg.userId);
-        return this.respond(msg.chatId, this.formatter.formatResult(result));
+          // Execute the action
+          const result = await this.registry.executeAction(pendingInput.action, params, msg.userId);
+          return this.respond(msg.chatId, this.formatter.formatResult(result));
+        }
       }
 
       // ── Step 1: Resolve intent ─────────────────────────────────────────

@@ -269,6 +269,94 @@ describe('Capabilities Fase 3 — add/list/cancel', () => {
     // El orquestador detecta param requerido "spec" vacío y emite prompt.
     expect(lastReply()).toMatch(/cuál es|cuál|qué/i);
   });
+
+  // ── Regresión reportada: tras completar draft con hora, /recordatorios
+  //    debe seguir respondiendo (estado pendiente correctamente limpiado).
+  test('regresión: /recordatorios funciona tras completar draft con hora (8am)', async () => {
+    await adapter.receive('/recordar mañana llamar al doctor');
+    expect(lastReply()).toMatch(/A qué hora mañana/i);
+
+    adapter.reset();
+    await adapter.receive('8am');
+    expect(lastReply()).toMatch(/Te recuerdo "Llamar al doctor"/);
+
+    // Estado pendiente debe estar limpio
+    const draft = await storage.adhdCoachStore.getPendingReminderDraft(user);
+    expect(draft).toBeNull();
+    const pi = await storage.sessionStore.getPendingInput(user);
+    expect(pi).toBeNull();
+    const pa = await storage.sessionStore.getPendingAction(user);
+    expect(pa).toBeNull();
+
+    adapter.reset();
+    await adapter.receive('/recordatorios');
+    expect(lastReply()).toContain('Llamar al doctor');
+    expect(lastReply()).toMatch(/Recordatorios pendientes/);
+  });
+
+  test('regresión: /cancel limpia draft y /recordatorios vuelve a responder', async () => {
+    await adapter.receive('/recordar mañana llamar al doctor');
+    expect(lastReply()).toMatch(/A qué hora mañana/i);
+
+    adapter.reset();
+    await adapter.receive('/cancel');
+    // El orchestrator solo limpia pending_input/pending_action; el draft del
+    // dominio NO se limpia con /cancel — pero /recordatorios debe responder
+    // igualmente porque el draft no bloquea slash commands.
+    adapter.reset();
+    await adapter.receive('/recordatorios');
+    expect(lastReply()).toMatch(/Recordatorios pendientes|No tienes recordatorios/);
+  });
+
+  test('regresión: slash commands tienen prioridad sobre draft pendiente', async () => {
+    // Si hay un draft pendiente y el usuario manda un slash command, el
+    // comando debe ejecutarse normalmente (no debe ser tragado por el draft).
+    await adapter.receive('/recordar mañana llamar al doctor');
+    expect(lastReply()).toMatch(/A qué hora mañana/i);
+
+    adapter.reset();
+    await adapter.receive('/recordatorios');
+    // El draft sigue ahí (no se ha completado), pero /recordatorios
+    // debe responder. La lista estará vacía (aún no se creó el recordatorio).
+    expect(lastReply()).toMatch(/Recordatorios pendientes|No tienes recordatorios/);
+  });
+
+  test('regresión: pending_input persistido NO traga slash commands', async () => {
+    // Simula el caso producción: pending_input quedó persistido en la sesión
+    // (p.ej. de un reinicio anterior con Postgres). El siguiente /recordatorios
+    // debe ejecutarse normalmente, NO ser consumido como valor del pending.
+    await storage.sessionStore.setPendingInput(user, {
+      action: 'add_micro_task',
+      paramName: 'text',
+      prompt: 'fake-prompt',
+    });
+
+    await adapter.receive('/recordatorios');
+    // Debe responder como list_reminders, NO como add_micro_task con
+    // text="/recordatorios".
+    expect(lastReply()).toMatch(/No tienes recordatorios|Recordatorios pendientes/);
+
+    // El pending_input debe quedar limpio tras el escape.
+    const pi = await storage.sessionStore.getPendingInput(user);
+    expect(pi).toBeNull();
+  });
+
+  test('regresión: pending_input persistido SÍ traga texto plano (comportamiento original)', async () => {
+    // Para que el escape de slash commands sea quirúrgico: el texto plano
+    // (no-slash) SIGUE siendo consumido como valor del pending. Esto
+    // preserva el flujo "agregar microtarea" → "revisar correo".
+    await storage.sessionStore.setPendingInput(user, {
+      action: 'add_micro_task',
+      paramName: 'text',
+      prompt: 'fake-prompt',
+    });
+
+    await adapter.receive('revisar correo');
+    expect(lastReply()).toMatch(/Micro-tarea agregada/);
+
+    const pi = await storage.sessionStore.getPendingInput(user);
+    expect(pi).toBeNull();
+  });
 });
 
 // ─── Suite 3: Tick dispatcher + silencio ─────────────────────────────────────
