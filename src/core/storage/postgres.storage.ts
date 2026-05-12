@@ -305,6 +305,67 @@ class PostgresAdhdCoachStore implements IAdhdCoachStore {
       [this.domainId, userId]
     );
   }
+
+  // ── Fase 4: flujos multi-paso (TCC, procrastinación, espiritualidad) ───
+  async setPendingFlowDraft(
+    userId: string,
+    draft: { flow: string; step: number; answers: string[]; metadata?: Record<string, string> },
+  ): Promise<void> {
+    await this.pool.query(
+      `DELETE FROM adhd_items WHERE domain_id = $1 AND user_id = $2 AND type = 'pending_flow_draft'`,
+      [this.domainId, userId]
+    );
+    await this.pool.query(
+      `INSERT INTO adhd_items (domain_id, user_id, type, text, completed)
+       VALUES ($1, $2, 'pending_flow_draft', $3, false)`,
+      [this.domainId, userId, JSON.stringify(draft)]
+    );
+  }
+  async getPendingFlowDraft(userId: string) {
+    const res = await this.pool.query(
+      `SELECT text FROM adhd_items
+       WHERE domain_id = $1 AND user_id = $2 AND type = 'pending_flow_draft'
+       ORDER BY created_at DESC LIMIT 1`,
+      [this.domainId, userId]
+    );
+    if (res.rows.length === 0) return null;
+    try {
+      const parsed = JSON.parse(res.rows[0].text);
+      if (!parsed || typeof parsed.flow !== 'string') return null;
+      return {
+        flow: String(parsed.flow),
+        step: Number(parsed.step ?? 1),
+        answers: Array.isArray(parsed.answers) ? parsed.answers.map(String) : [],
+        metadata: parsed.metadata ?? undefined,
+      };
+    } catch {
+      return null;
+    }
+  }
+  async clearPendingFlowDraft(userId: string): Promise<void> {
+    await this.pool.query(
+      `DELETE FROM adhd_items WHERE domain_id = $1 AND user_id = $2 AND type = 'pending_flow_draft'`,
+      [this.domainId, userId]
+    );
+  }
+
+  // ── Fase 4: journal (registros TCC, neuro, procrastinación, espiritual) ──
+  async addJournalEntry(userId: string, type: string, summary: string): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO adhd_items (domain_id, user_id, type, text, completed)
+       VALUES ($1, $2, $3, $4, false)`,
+      [this.domainId, userId, type, summary]
+    );
+  }
+  async countJournalEntries(userId: string, types: string[]): Promise<number> {
+    if (!types || types.length === 0) return 0;
+    const res = await this.pool.query(
+      `SELECT COUNT(*)::int AS n FROM adhd_items
+       WHERE domain_id = $1 AND user_id = $2 AND type = ANY($3::text[])`,
+      [this.domainId, userId, types]
+    );
+    return Number(res.rows[0]?.n ?? 0);
+  }
 }
 
 export class PostgresStorageProvider implements IStorageProvider {

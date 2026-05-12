@@ -98,6 +98,31 @@ export interface IAdhdCoachStore {
     userId: string,
   ): Promise<Array<{ text: string; category: string }> | null>;
   clearPendingAgendaSelection(userId: string): Promise<void>;
+
+  // ── Fase 4: flujos multi-paso (TCC, procrastinación, espiritualidad) ───
+  /**
+   * Draft genérico para flujos conversacionales multi-paso. Solo uno
+   * activo por usuario; setearlo sobrescribe el anterior. Persiste en
+   * `adhd_items` con `type='pending_flow_draft'` y JSON en `text`.
+   */
+  setPendingFlowDraft(
+    userId: string,
+    draft: { flow: string; step: number; answers: string[]; metadata?: Record<string, string> },
+  ): Promise<void>;
+  getPendingFlowDraft(
+    userId: string,
+  ): Promise<{ flow: string; step: number; answers: string[]; metadata?: Record<string, string> } | null>;
+  clearPendingFlowDraft(userId: string): Promise<void>;
+
+  // ── Fase 4: journal genérico (registros TCC, procrastinación, espiritual) ──
+  /**
+   * Persiste un registro de tipo arbitrario con resumen JSON o texto.
+   * Mismo mecanismo: nuevo `type` en `adhd_items`, `text=summary`.
+   * No usa el campo `date` (no son temporales por usuario).
+   */
+  addJournalEntry(userId: string, type: string, summary: string): Promise<void>;
+  /** Cuenta registros del usuario en los tipos dados. Usado por /privacidad. */
+  countJournalEntries(userId: string, types: string[]): Promise<number>;
 }
 
 export interface IStorageProvider {

@@ -340,9 +340,9 @@ describe('Domain Handler — ADHD Coach', () => {
     expect(adhdDomain.domainName).toBe('ADHD Coach');
   });
 
-  test('has 23 capabilities (incl. agenda_confirm_selection del refactor /agenda)', () => {
+  test('has 35 capabilities (incl. Fase 4: neuro, procrastinación, TCC, espiritualidad)', () => {
     const caps = adhdDomain.getCapabilities();
-    expect(caps.length).toBe(23);
+    expect(caps.length).toBe(35);
     // Originales
     expect(caps.find(c => c.name === 'daily_checkin')).toBeDefined();
     expect(caps.find(c => c.name === 'list_today_focus')).toBeDefined();

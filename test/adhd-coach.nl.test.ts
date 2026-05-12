@@ -190,7 +190,7 @@ describe('Fase 4 — NL conversacional ligera', () => {
     expect(r).toContain('/recordar');
     expect(r).toContain('/recordatorios');
     expect(r).toContain('/silencio');
-    expect(r).toContain('lenguaje natural');
+    expect(r).toMatch(/frases como|lenguaje natural/i);
     // NO debe filtrar nombres técnicos al usuario:
     expect(r).not.toContain('add_reminder');
     expect(r).not.toContain('list_reminders');

@@ -190,6 +190,65 @@ async function main() {
   await adapter.send('ya los cargaste a mi agenda');
   log('USER: "ya los cargaste a mi agenda?" → list_today_focus', adapter.last());
 
+  // ── Fase 4: neuro-reset + procrastinación + TCC + espiritualidad ────────
+  adapter.reset();
+  await adapter.send('estoy saturado');
+  log('USER: estoy saturado → neuro_reset', adapter.last());
+
+  adapter.reset();
+  await adapter.send('terminar reporte trimestral');
+  log('USER: <tarea evitada> → micro_action_from_avoidance', adapter.last());
+
+  adapter.reset();
+  await adapter.send('/procrastinacion');
+  log('USER: /procrastinacion', adapter.last());
+
+  adapter.reset();
+  await adapter.send('limpiar el garaje');
+  log('USER: <tarea>', adapter.last());
+
+  adapter.reset();
+  await adapter.send('/rpec');
+  log('USER: /rpec (paso 1)', adapter.last());
+  await adapter.send('mi jefe me llamó de imprevisto');
+  log('USER: situación (paso 2 pregunta pensamiento)', adapter.last());
+  await adapter.send('seguro va a regañarme');
+  log('USER: pensamiento (paso 3 emoción)', adapter.last());
+  await adapter.send('ansiedad 8');
+  log('USER: emoción (paso 4 conducta)', adapter.last());
+  await adapter.send('quise huir');
+  log('USER: conducta (paso 5 acción)', adapter.last());
+  await adapter.send('respirar y preparar mis notas');
+  log('USER: acción → resumen final', adapter.last());
+
+  adapter.reset();
+  await adapter.send('no sirvo para esto');
+  log('USER: "no sirvo para esto" → reencuadre (NL)', adapter.last());
+
+  adapter.reset();
+  await adapter.send('/oracion');
+  log('USER: /oracion', adapter.last());
+
+  adapter.reset();
+  await adapter.send('/devocional');
+  log('USER: /devocional', adapter.last());
+
+  adapter.reset();
+  await adapter.send('/espiritual');
+  log('USER: /espiritual', adapter.last());
+  await adapter.send('B');
+  log('USER: B → gratitud', adapter.last());
+
+  adapter.reset();
+  await adapter.send('Dios necesito fe para no procrastinar más');
+  log('USER: fe + procrastinación → neuro_or_faith_offer', adapter.last());
+  await adapter.send('ambos');
+  log('USER: ambos → respuesta integrada', adapter.last());
+
+  adapter.reset();
+  await adapter.send('/privacidad');
+  log('USER: /privacidad (con conteos Fase 4)', adapter.last());
+
   // 12) Silencio + tick con vencido → no debe enviar
   adapter.reset();
   await adapter.send('/silencio 2h');

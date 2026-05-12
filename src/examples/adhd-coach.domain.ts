@@ -925,6 +925,100 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
         riskLevel: RiskLevel.READ_ONLY,
         requiresConfirmation: false,
       },
+      // ── Fase 4B: neuro-reset y procrastinación ───────────────────────────
+      {
+        name: 'neuro_reset',
+        description: 'Regulación breve cuando estás saturado o bloqueado',
+        parameters: {},
+        riskLevel: RiskLevel.LOW_RISK_WRITE,
+        requiresConfirmation: false,
+      },
+      {
+        name: 'procrastination_decode',
+        description: 'Inicia decodificación de procrastinación / evitación',
+        parameters: {},
+        riskLevel: RiskLevel.LOW_RISK_WRITE,
+        requiresConfirmation: false,
+      },
+      {
+        name: 'micro_action_from_avoidance',
+        description: 'Convierte tarea evitada en una acción mínima',
+        parameters: {
+          task: { type: 'string', description: 'La tarea que estás evitando', required: true },
+        },
+        riskLevel: RiskLevel.LOW_RISK_WRITE,
+        requiresConfirmation: false,
+      },
+      // ── Fase 4C: TCC ─────────────────────────────────────────────────────
+      {
+        name: 'rpec',
+        description: 'Inicia un Registro Pensamiento-Emoción-Conducta breve',
+        parameters: {},
+        riskLevel: RiskLevel.LOW_RISK_WRITE,
+        requiresConfirmation: false,
+      },
+      {
+        name: 'reencuadre',
+        description: 'Inicia un reencuadre de pensamiento como hipótesis',
+        parameters: {},
+        riskLevel: RiskLevel.LOW_RISK_WRITE,
+        requiresConfirmation: false,
+      },
+      {
+        name: 'dopar',
+        description: 'Inicia DOPAR: definir, opciones, plan, acción, revisión',
+        parameters: {},
+        riskLevel: RiskLevel.LOW_RISK_WRITE,
+        requiresConfirmation: false,
+      },
+      {
+        name: 'revision_tcc',
+        description: 'Revisión breve de patrones (no análisis profundo)',
+        parameters: {},
+        riskLevel: RiskLevel.LOW_RISK_WRITE,
+        requiresConfirmation: false,
+      },
+      {
+        // Capability genérica que avanza cualquier flujo multi-paso de Fase 4
+        // (RPEC, reencuadre, DOPAR, revisión, procrastinación, espiritual).
+        // Lee el flow desde pending_flow_draft.
+        name: 'flow_step',
+        description: 'Avanza un flujo conversacional con la respuesta del usuario',
+        parameters: {
+          answer: { type: 'string', description: 'Respuesta a la pregunta anterior', required: true },
+        },
+        riskLevel: RiskLevel.LOW_RISK_WRITE,
+        requiresConfirmation: false,
+      },
+      // ── Fase 4D: espiritualidad cristiana ────────────────────────────────
+      {
+        name: 'christian_prayer',
+        description: 'Oración breve guiada cristiana',
+        parameters: {},
+        riskLevel: RiskLevel.READ_ONLY,
+        requiresConfirmation: false,
+      },
+      {
+        name: 'christian_devotional',
+        description: 'Devocional breve: verdad, pregunta, acción, oración',
+        parameters: {},
+        riskLevel: RiskLevel.READ_ONLY,
+        requiresConfirmation: false,
+      },
+      {
+        name: 'spiritual_mode',
+        description: 'Elige una práctica espiritual breve',
+        parameters: {},
+        riskLevel: RiskLevel.READ_ONLY,
+        requiresConfirmation: false,
+      },
+      {
+        name: 'neuro_or_faith_offer',
+        description: 'Ofrece abordar bloqueo desde neurociencia, fe o ambos',
+        parameters: {},
+        riskLevel: RiskLevel.READ_ONLY,
+        requiresConfirmation: false,
+      },
     ];
   }
 
@@ -944,6 +1038,19 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
       // Fase 3 (sin args): comandos directos
       '/recordatorios': 'list_reminders',
       '/ver_recordatorios': 'show_overdue_reminders',
+      // Fase 4B
+      '/reset90': 'neuro_reset',
+      '/soma': 'neuro_reset',
+      '/procrastinacion': 'procrastination_decode',
+      // Fase 4C
+      '/rpec': 'rpec',
+      '/reencuadre': 'reencuadre',
+      '/dopar': 'dopar',
+      '/revision': 'revision_tcc',
+      // Fase 4D
+      '/oracion': 'christian_prayer',
+      '/devocional': 'christian_devotional',
+      '/espiritual': 'spiritual_mode',
       // NOTA: /silencio, /recordar y /cancelar_recordatorio NO se mapean aquí
       // porque sus rules capturan argumentos del usuario.
     };
@@ -1050,12 +1157,12 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
           return { dump: (m?.[1] ?? '').trim() };
         },
       },
-      // NL para iniciar el flujo
+      // NL para iniciar el flujo de agenda
       {
         patterns: [
           /^(organiza mi dia|ordena mi dia|ayudame con el dia)$/,
           /^(quiero ordenar mi dia|ayudame a ordenar mi dia|quiero organizar mi dia)$/,
-          /^(estoy bloqueado|no se por donde empezar|no se que hacer)$/,
+          /^(no se que hacer)$/,
         ],
         action: 'agenda_start',
       },
@@ -1171,6 +1278,46 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
         ],
         action: 'what_can_you_do',
       },
+
+      // ── Fase 4B — Neuro-reset y procrastinación ──────────────────────────
+      // ORDEN: neuro_or_faith_offer ANTES de neuro_reset y procrastination,
+      // para que si el usuario menciona fe+bloqueo gane la oferta combinada.
+      {
+        // Fe + bloqueo/procrastinación → preguntar enfoque.
+        // Usa \w* en los sufijos para capturar "procrastinacion",
+        // "procrastinando", "evitando", "evito", "postergando", etc.
+        patterns: [
+          /(?=.*\b(dios|fe|pecado|oracion|obediencia|llamado|proposito|culpa(?: espiritual| religiosa)?)\b)(?=.*\b(procrastin\w*|bloqueado|saturado|evit\w*|postergand\w*|no puedo empezar|no me da la vida|colapsad\w*|cabeza llena|tarea evitada)\b)/,
+        ],
+        action: 'neuro_or_faith_offer',
+      },
+      // Neuro-reset NL
+      {
+        patterns: [
+          /^(estoy saturado|estoy bloqueado|no puedo empezar|tengo la cabeza llena|no me da la vida|estoy colapsado|no se por donde empezar)$/,
+        ],
+        action: 'neuro_reset',
+      },
+      // Procrastinación NL
+      {
+        patterns: [
+          /^(estoy procrastinando|no puedo dejar el celular|estoy evitando una tarea|se que hacer pero no empiezo|quiero hacerlo pero no arranco|estoy postergando|estoy evadiendo)$/,
+        ],
+        action: 'procrastination_decode',
+      },
+
+      // ── Fase 4C — Reencuadre NL (frases automáticas comunes) ─────────────
+      // NOTA: estos triggers son específicos para pensamientos rumiantes que
+      // NO son crisis (crisis pre-filter ya intercepta antes).
+      {
+        patterns: [
+          /^(no sirvo para esto|siempre arruino todo|ya fall[eé]|si no lo hago perfecto no cuenta)$/,
+          /^estoy pensando que .+$/,
+          /^siento que soy .+$/,
+          /^seguro va a salir mal$/,
+        ],
+        action: 'reencuadre',
+      },
     ];
   }
 
@@ -1225,6 +1372,33 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
         return this.explainNaturalLanguage();
       case 'what_can_you_do':
         return this.whatCanYouDo();
+      // ── Fase 4B ──
+      case 'neuro_reset':
+        return await this.neuroReset(userId);
+      case 'procrastination_decode':
+        return this.procrastinationDecode(userId);
+      case 'micro_action_from_avoidance':
+        return await this.microActionFromAvoidance(userId, params);
+      // ── Fase 4C ──
+      case 'rpec':
+        return await this.startTccFlow(userId, 'rpec');
+      case 'reencuadre':
+        return await this.startTccFlow(userId, 'reencuadre');
+      case 'dopar':
+        return await this.startTccFlow(userId, 'dopar');
+      case 'revision_tcc':
+        return await this.startTccFlow(userId, 'revision_tcc');
+      case 'flow_step':
+        return await this.flowStep(userId, params);
+      // ── Fase 4D ──
+      case 'christian_prayer':
+        return this.christianPrayer();
+      case 'christian_devotional':
+        return this.christianDevotional();
+      case 'spiritual_mode':
+        return await this.spiritualMode(userId);
+      case 'neuro_or_faith_offer':
+        return await this.neuroOrFaithOffer(userId);
       default:
         return { success: false, message: `Acción "${action}" no implementada en ADHD Coach.` };
     }
@@ -1422,6 +1596,19 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
     } else {
       lines.push('- Recordatorios programados: ninguno.');
     }
+    // Cosmovisión declarada (Fase 4D).
+    lines.push('- Cosmovisión declarada por ti: cristiana.');
+    // Conteos de Fase 4 (TCC, neuro/procrastinación, espiritual).
+    const tccCount = await this.store.countJournalEntries(userId, [
+      'tcc_rpec', 'tcc_reframe', 'tcc_dopar', 'tcc_review',
+    ]);
+    const neuroCount = await this.store.countJournalEntries(userId, [
+      'neuro_reset', 'procrastination_note',
+    ]);
+    const spiritualCount = await this.store.countJournalEntries(userId, ['spiritual_practice']);
+    lines.push(`- Registros TCC guardados: ${tccCount}.`);
+    lines.push(`- Registros de procrastinación/neuro-reset: ${neuroCount}.`);
+    lines.push(`- Prácticas espirituales guardadas: ${spiritualCount}.`);
     lines.push('- Preferencias básicas: ninguna registrada todavía.');
     lines.push('');
     lines.push('Opciones: A) borrar todo, B) borrar una parte, C) cambiar consentimientos.');
@@ -1795,16 +1982,16 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
     const message = [
       'Claro. Te explico los principales:',
       '',
-      '- /agenda: me vuelcas todo lo que tienes en la cabeza y lo ordeno.',
+      '- /agenda: me vuelcas lo que tienes en la cabeza y lo ordeno.',
       '- /recordar: programo un recordatorio con fecha y hora.',
       '- /recordatorios: te muestro lo pendiente.',
       '- /silencio: pauso mensajes proactivos.',
-      '- /abandonar: te ayudo a pausar antes de rendirte.',
-      '- /reinicio: vuelves al mínimo sin culpa.',
+      '- /abandonar: hacemos una pausa antes de rendirte.',
+      '- /reinicio: volvemos al mínimo sin culpa.',
+      '- /reset90: bajamos saturación antes de pensar.',
+      '- /procrastinacion: entendemos la evitación y la convertimos en acción mínima.',
       '- /privacidad: ves qué guardo y puedes borrar datos.',
       '- /recursos: muestra líneas de apoyo.',
-      '- /checkin: registro tu check-in del día.',
-      '- /focus: te muestro tu foco y microtareas.',
     ].join('\n');
     return { success: true, message };
   }
@@ -1828,9 +2015,10 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
 
   private whatCanYouDo(): ActionResult {
     const message =
-      'Puedo ayudarte a ordenar el día, crear recordatorios, partir tareas grandes, ' +
-      'pausar antes de abandonar, reiniciar sin culpa, activar silencio, mostrar qué ' +
-      'datos guardo y darte recursos de apoyo si estás en riesgo.';
+      'Puedo ayudarte a ordenar tu día, crear recordatorios, partir tareas grandes, ' +
+      'pausar antes de abandonar, reiniciar sin culpa, regularte cuando estás saturado, ' +
+      'revisar pensamientos con herramientas simples y acompañarte con oración o ' +
+      'reflexión cristiana si lo quieres.';
     return { success: true, message };
   }
 
@@ -1851,18 +2039,27 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
       '/checkin — registrar cómo vas.',
       '/focus — ver foco y microtareas.',
       '',
-      'Herramientas TCC (próximamente):',
+      'Regulación y procrastinación:',
+      '/reset90 — regularte cuando estás saturado.',
+      '/procrastinacion — entender y destrabar evitación.',
+      '',
+      'Herramientas TCC:',
       '/rpec — ordenar pensamiento, emoción y conducta.',
       '/reencuadre — revisar un pensamiento automático.',
       '/dopar — resolver un problema paso a paso.',
       '/revision — revisar patrones.',
       '',
-      'Puedes escribir en lenguaje natural, por ejemplo:',
+      'Espiritualidad cristiana:',
+      '/oracion — oración breve guiada.',
+      '/devocional — pausa espiritual breve.',
+      '/espiritual — elegir oración, gratitud, examen o intención del día.',
+      '',
+      'También puedes escribir frases como:',
       '- "recuérdame mañana a las 9 llamar al doctor"',
-      '- "me rindo"',
       '- "quiero ordenar mi día"',
-      '- "no sé por dónde empezar"',
+      '- "me rindo"',
       '- "estoy bloqueado"',
+      '- "estoy procrastinando"',
       '- "qué puedes hacer"',
       '- "para qué sirve /agenda"',
     ].join('\n');
@@ -1872,9 +2069,407 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
   getFallbackMessage(): string {
     return (
       'No lo entendí del todo. Puedo ayudarte con agenda, recordatorios, bloqueo, ' +
-      'reinicio, silencio o privacidad. Prueba: "qué puedes hacer", "quiero ordenar ' +
-      'mi día" o /help.'
+      'reinicio, silencio, privacidad, procrastinación o TCC breve. ' +
+      'Prueba: "qué puedes hacer", "quiero ordenar mi día", "estoy bloqueado" o /help.'
     );
+  }
+
+  // ─── Fase 4B: neuro-reset y procrastinación ─────────────────────────────
+
+  private async neuroReset(userId: string): Promise<ActionResult> {
+    await this.store.addJournalEntry(userId, 'neuro_reset', new Date().toISOString());
+    const message = [
+      'Pausa. No vamos a resolver todo ahora.',
+      'Puede que tu sistema esté en modo alerta, no en modo flojera.',
+      '',
+      'Haz esto:',
+      '1. Suelta mandíbula y hombros.',
+      '2. Exhala lento una vez.',
+      '3. Mira un punto fijo durante 10 segundos.',
+      '',
+      'Ahora dime solo una cosa: ¿qué tarea estás evitando?',
+    ].join('\n');
+    return {
+      success: true,
+      message,
+      pendingInput: {
+        action: 'micro_action_from_avoidance',
+        paramName: 'task',
+        prompt: '¿Qué tarea estás evitando?',
+      },
+    };
+  }
+
+  private procrastinationDecode(_userId: string): ActionResult {
+    const message = [
+      'Puede que tu cerebro no esté buscando flojera, sino alivio rápido.',
+      'Cuando una tarea se siente grande, ambigua o amenazante, es normal ' +
+        'buscar escape inmediato. No vamos a pelear con eso; vamos a reducir ' +
+        'la amenaza.',
+      '',
+      '¿Qué tarea estás evitando? Escríbela en una frase.',
+    ].join('\n');
+    return {
+      success: true,
+      message,
+      pendingInput: {
+        action: 'micro_action_from_avoidance',
+        paramName: 'task',
+        prompt: '¿Qué tarea estás evitando?',
+      },
+    };
+  }
+
+  private async microActionFromAvoidance(
+    userId: string,
+    params: Record<string, unknown>,
+  ): Promise<ActionResult> {
+    const task = String(params.task ?? '').trim();
+    if (!task) {
+      return {
+        success: false,
+        message: '⚠️ Necesito la tarea que estás evitando, en una frase.',
+        pendingInput: {
+          action: 'micro_action_from_avoidance',
+          paramName: 'task',
+          prompt: '¿Qué tarea estás evitando?',
+        },
+      };
+    }
+    // Persistir tarea evitada (sin elección todavía).
+    await this.store.addJournalEntry(
+      userId,
+      'procrastination_note',
+      JSON.stringify({ task, at: new Date().toISOString() }),
+    );
+    const message = [
+      'Vamos a bajarla de amenaza a movimiento. La primera acción no es ' +
+        'terminarla. Es solo abrir la puerta.',
+      '',
+      'Elige una:',
+      'A) abrir el archivo',
+      'B) escribir una línea imperfecta',
+      'C) poner temporizador de 2 minutos',
+      'D) pedir ayuda o aclarar el siguiente paso',
+    ].join('\n');
+    return { success: true, message };
+  }
+
+  // ─── Fase 4C: TCC — flujo multi-paso genérico ───────────────────────────
+
+  // Cada flujo declara sus preguntas. El handler `flow_step` avanza el draft.
+  private static readonly TCC_FLOWS: Record<string, {
+    intro: string;
+    questions: string[];
+    journalType: string;
+    summaryLabels: string[];
+  }> = {
+    rpec: {
+      intro:
+        'Vamos con un RPEC breve. No es terapia; es una herramienta de ' +
+        'organización mental. Primero: ¿qué pasó?',
+      questions: [
+        '¿Qué pensamiento apareció?',
+        '¿Qué emoción sentiste y con qué intensidad 1-10?',
+        '¿Qué hiciste o qué impulso apareció?',
+        '¿Cuál sería una acción pequeña útil ahora?',
+      ],
+      journalType: 'tcc_rpec',
+      summaryLabels: ['Situación', 'Pensamiento', 'Emoción', 'Conducta/impulso', 'Acción pequeña'],
+    },
+    reencuadre: {
+      intro:
+        'Tomemos ese pensamiento como hipótesis, no como sentencia. ' +
+        '¿Cuál es la frase exacta que te está pegando?',
+      questions: [
+        '¿Qué evidencia lo apoya?',
+        '¿Qué evidencia lo matiza?',
+        '¿Cuál sería una versión más útil y realista?',
+        '¿Qué acción pequeña haría esa versión?',
+      ],
+      journalType: 'tcc_reframe',
+      summaryLabels: ['Pensamiento', 'Evidencia a favor', 'Evidencia que matiza', 'Versión útil', 'Acción pequeña'],
+    },
+    dopar: {
+      intro: 'Vamos con DOPAR. Primero, define el problema en una frase sencilla.',
+      questions: [
+        'Dame 2 o 3 opciones posibles, aunque sean imperfectas.',
+        'Elige un plan mínimo.',
+        '¿Cuál es la acción de 2 minutos?',
+        '¿Cuándo revisamos?',
+      ],
+      journalType: 'tcc_dopar',
+      summaryLabels: ['Problema', 'Opciones', 'Plan', 'Acción 2 min', 'Revisión'],
+    },
+    revision_tcc: {
+      intro: '¿Qué se repitió esta semana?',
+      questions: [
+        '¿Qué te ayudó aunque fuera poco?',
+        '¿Qué obstáculo apareció?',
+        '¿Qué ajuste pequeño hacemos?',
+        '¿Quieres programar un recordatorio? (sí/no)',
+      ],
+      journalType: 'tcc_review',
+      summaryLabels: ['Repetido', 'Ayudó', 'Obstáculo', 'Ajuste', 'Recordatorio'],
+    },
+  };
+
+  private async startTccFlow(userId: string, flow: keyof typeof AdhdCoachDomainHandler.TCC_FLOWS): Promise<ActionResult> {
+    const def = AdhdCoachDomainHandler.TCC_FLOWS[flow];
+    // Sobrescribe cualquier draft previo (incluido un flow distinto).
+    await this.store.setPendingFlowDraft(userId, { flow, step: 1, answers: [] });
+    return {
+      success: true,
+      message: def.intro,
+      pendingInput: {
+        action: 'flow_step',
+        paramName: 'answer',
+        prompt: def.intro,
+      },
+    };
+  }
+
+  private async flowStep(userId: string, params: Record<string, unknown>): Promise<ActionResult> {
+    const answer = String(params.answer ?? '').trim();
+    const draft = await this.store.getPendingFlowDraft(userId);
+    if (!draft) {
+      return {
+        success: false,
+        message:
+          'ℹ️ No hay un flujo activo. Inicia con /rpec, /reencuadre, /dopar, /revision o /espiritual.',
+      };
+    }
+    if (!answer) {
+      return {
+        success: false,
+        message: '⚠️ Necesito que escribas una respuesta.',
+        pendingInput: { action: 'flow_step', paramName: 'answer', prompt: '¿Y...?' },
+      };
+    }
+
+    // Flujos de elección rápida (single-step).
+    if (draft.flow === 'spiritual_choice') {
+      await this.store.clearPendingFlowDraft(userId);
+      return this.resolveSpiritualChoice(userId, answer);
+    }
+    if (draft.flow === 'neuro_or_faith') {
+      await this.store.clearPendingFlowDraft(userId);
+      return this.resolveNeuroOrFaith(answer);
+    }
+
+    // Flujos TCC multi-paso.
+    const def = AdhdCoachDomainHandler.TCC_FLOWS[draft.flow];
+    if (!def) {
+      await this.store.clearPendingFlowDraft(userId);
+      return {
+        success: false,
+        message: 'ℹ️ Flujo desconocido. Empieza de nuevo con /rpec, /reencuadre, /dopar o /revision.',
+      };
+    }
+    const answers = [...draft.answers, answer];
+    const totalSteps = def.questions.length + 1; // 1 intro + N follow-ups
+    if (answers.length < totalSteps) {
+      const nextQuestion = def.questions[answers.length - 1];
+      await this.store.setPendingFlowDraft(userId, { flow: draft.flow, step: draft.step + 1, answers });
+      return {
+        success: true,
+        message: nextQuestion,
+        pendingInput: { action: 'flow_step', paramName: 'answer', prompt: nextQuestion },
+      };
+    }
+    // Finalización: persistir + resumen.
+    const summary = answers.map((a, i) => `- ${def.summaryLabels[i]}: ${escapeMdV1(a)}`).join('\n');
+    await this.store.addJournalEntry(userId, def.journalType, JSON.stringify(answers));
+    await this.store.clearPendingFlowDraft(userId);
+    return {
+      success: true,
+      message: [
+        'Gracias. Lo dejo resumido así:',
+        summary,
+        '',
+        'No buscamos perfección. Solo un siguiente paso.',
+      ].join('\n'),
+    };
+  }
+
+  private async resolveSpiritualChoice(userId: string, answer: string): Promise<ActionResult> {
+    const a = stripAccentsLower(answer).trim();
+    const letter = (a.match(/^([a-e])\b/)?.[1] ??
+      (/\boracion\b/.test(a) ? 'a' :
+       /\bgratitud\b/.test(a) ? 'b' :
+       /\bexamen\b/.test(a) ? 'c' :
+       /\bintencion\b/.test(a) ? 'd' :
+       /\bintegrar|tarea\b/.test(a) ? 'e' : '')) as 'a'|'b'|'c'|'d'|'e'|'';
+    let kind = '';
+    let body = '';
+    switch (letter) {
+      case 'a':
+        kind = 'prayer';
+        body =
+          'Oración breve: Señor, dame claridad y paz. Ayúdame a moverme desde ' +
+          'gracia, no desde culpa. Amén.';
+        break;
+      case 'b':
+        kind = 'gratitude';
+        body = 'Gratitud: nombra 3 cosas pequeñas por las que puedes dar gracias ahora.';
+        break;
+      case 'c':
+        kind = 'examen';
+        body =
+          'Examen del día: ¿dónde sentiste paz hoy? ¿dónde sentiste resistencia? ' +
+          '¿qué quieres entregar?';
+        break;
+      case 'd':
+        kind = 'intencion';
+        body =
+          'Intención del día: nómbrala en una frase. Hoy quiero responder con ' +
+          '____ ante ____.';
+        break;
+      case 'e':
+        kind = 'integrar';
+        body =
+          'Integración: dime la tarea concreta y la unimos a una oración o ' +
+          'intención sencilla.';
+        break;
+      default:
+        return {
+          success: false,
+          message: '⚠️ No entendí. Responde con A, B, C, D o E.',
+          pendingInput: {
+            action: 'flow_step',
+            paramName: 'answer',
+            prompt: '¿A, B, C, D o E?',
+          },
+        };
+    }
+    await this.store.addJournalEntry(
+      userId,
+      'spiritual_practice',
+      JSON.stringify({ kind, at: new Date().toISOString() }),
+    );
+    return { success: true, message: body };
+  }
+
+  private resolveNeuroOrFaith(answer: string): ActionResult {
+    const a = stripAccentsLower(answer).trim();
+    const isAmbos = /\bambos\b|\b(neuro.*fe|fe.*neuro|c)\b/.test(a) && !/^a\b/.test(a) && !/^b\b/.test(a);
+    const isNeuro = /^a\b|\bneuro|neurociencia/.test(a) && !isAmbos;
+    const isFe = /^b\b|\bfe\b|espiritual/.test(a) && !isAmbos;
+
+    if (isAmbos || /^c\b/.test(a)) {
+      return {
+        success: true,
+        message: [
+          'Neuro: puede que tu sistema esté buscando alivio rápido porque la ' +
+            'tarea se siente grande o amenazante.',
+          'Fe: no necesitas obedecer desde culpa; puedes responder desde gracia ' +
+            'con un paso pequeño y fiel.',
+          'Acción: abre la puerta con 2 minutos. ¿Cuál es la tarea?',
+        ].join('\n'),
+      };
+    }
+    if (isNeuro) {
+      return {
+        success: true,
+        message: [
+          'Pausa. Suelta mandíbula y hombros. Exhala lento.',
+          'Tu sistema puede estar en modo alerta, no en flojera.',
+          '',
+          '¿Cuál es la tarea? La bajamos de amenaza a un primer paso pequeño.',
+        ].join('\n'),
+      };
+    }
+    if (isFe) {
+      return {
+        success: true,
+        message: [
+          'Desde gracia, no desde culpa: no necesitas resolver toda tu vida ' +
+            'para obedecer en el siguiente paso.',
+          'Acción: 2 minutos de fidelidad pequeña. ¿Cuál es la tarea?',
+        ].join('\n'),
+      };
+    }
+    return {
+      success: false,
+      message: '⚠️ No entendí. Responde A (neurociencia), B (fe) o C (ambos).',
+      pendingInput: {
+        action: 'flow_step',
+        paramName: 'answer',
+        prompt: 'A) neurociencia, B) fe, C) ambos',
+      },
+    };
+  }
+
+  // ─── Fase 4D: espiritualidad cristiana ──────────────────────────────────
+
+  private christianPrayer(): ActionResult {
+    const message = [
+      'Claro. Oramos breve:',
+      '',
+      'Señor, dame claridad para hacer lo siguiente con humildad y paciencia. ' +
+        'Ayúdame a no moverme desde la culpa, sino desde la obediencia sencilla. ' +
+        'Amén.',
+      '',
+      'Ahora dime: ¿cuál es la siguiente acción pequeña?',
+    ].join('\n');
+    return { success: true, message };
+  }
+
+  private christianDevotional(): ActionResult {
+    const message = [
+      'Verdad: no necesitas resolver toda tu vida para obedecer en el siguiente paso.',
+      '',
+      'Pregunta: ¿qué pequeño acto de fidelidad está delante de ti ahora?',
+      '',
+      'Acción: haz 2 minutos de la tarea que estás evitando.',
+      '',
+      'Oración: Señor, ayúdame a ser fiel en lo pequeño. Amén.',
+    ].join('\n');
+    return { success: true, message };
+  }
+
+  private async spiritualMode(userId: string): Promise<ActionResult> {
+    const message = [
+      '¿Quieres una práctica espiritual breve ahora?',
+      '',
+      'A) oración',
+      'B) gratitud',
+      'C) examen del día',
+      'D) intención del día',
+      'E) integrar esto con una tarea concreta',
+    ].join('\n');
+    await this.store.setPendingFlowDraft(userId, {
+      flow: 'spiritual_choice',
+      step: 1,
+      answers: [],
+    });
+    return {
+      success: true,
+      message,
+      pendingInput: {
+        action: 'flow_step',
+        paramName: 'answer',
+        prompt: '¿A, B, C, D o E?',
+      },
+    };
+  }
+
+  private async neuroOrFaithOffer(userId: string): Promise<ActionResult> {
+    const message = '¿Quieres que lo abordemos desde neurociencia, espiritualidad cristiana o ambos?';
+    await this.store.setPendingFlowDraft(userId, {
+      flow: 'neuro_or_faith',
+      step: 1,
+      answers: [],
+    });
+    return {
+      success: true,
+      message,
+      pendingInput: {
+        action: 'flow_step',
+        paramName: 'answer',
+        prompt: 'A) neurociencia, B) fe, C) ambos',
+      },
+    };
   }
 
   /**

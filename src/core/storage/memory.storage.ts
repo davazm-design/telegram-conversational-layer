@@ -71,6 +71,10 @@ class MemoryAdhdCoachStore implements IAdhdCoachStore {
   private overdueSummary = new Map<string, { reminderIds: string[] }>();
   // Refactor /agenda: candidatos clasificados pendientes de selección.
   private agendaSelection = new Map<string, Array<{ text: string; category: string }>>();
+  // Fase 4: flujos multi-paso (TCC, procrastinación, espiritual).
+  private flowDraft = new Map<string, { flow: string; step: number; answers: string[]; metadata?: Record<string, string> }>();
+  // Fase 4: registros de "journal" agrupados por tipo.
+  private journal = new Map<string, Array<{ type: string; summary: string }>>();
   private reminderSeq = 0;
   private key(userId: string) { return `${this.domainId}:${userId}`; }
 
@@ -130,6 +134,8 @@ class MemoryAdhdCoachStore implements IAdhdCoachStore {
     this.reminderDraft.delete(k);
     this.overdueSummary.delete(k);
     this.agendaSelection.delete(k);
+    this.flowDraft.delete(k);
+    this.journal.delete(k);
   }
 
   // ── Fase 3: reminders ──────────────────────────────────────────────────
@@ -216,6 +222,45 @@ class MemoryAdhdCoachStore implements IAdhdCoachStore {
   }
   async clearPendingAgendaSelection(userId: string) {
     this.agendaSelection.delete(this.key(userId));
+  }
+
+  // ── Fase 4 ──
+  async setPendingFlowDraft(
+    userId: string,
+    draft: { flow: string; step: number; answers: string[]; metadata?: Record<string, string> },
+  ) {
+    this.flowDraft.set(this.key(userId), {
+      flow: draft.flow,
+      step: draft.step,
+      answers: [...draft.answers],
+      metadata: draft.metadata ? { ...draft.metadata } : undefined,
+    });
+  }
+  async getPendingFlowDraft(userId: string) {
+    const d = this.flowDraft.get(this.key(userId));
+    if (!d) return null;
+    return {
+      flow: d.flow,
+      step: d.step,
+      answers: [...d.answers],
+      metadata: d.metadata ? { ...d.metadata } : undefined,
+    };
+  }
+  async clearPendingFlowDraft(userId: string) {
+    this.flowDraft.delete(this.key(userId));
+  }
+
+  async addJournalEntry(userId: string, type: string, summary: string) {
+    const k = this.key(userId);
+    const list = this.journal.get(k) ?? [];
+    list.push({ type, summary });
+    this.journal.set(k, list);
+  }
+  async countJournalEntries(userId: string, types: string[]) {
+    const list = this.journal.get(this.key(userId)) ?? [];
+    if (!types || types.length === 0) return list.length;
+    const set = new Set(types);
+    return list.filter((e) => set.has(e.type)).length;
   }
 }
 
