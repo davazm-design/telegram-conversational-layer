@@ -451,6 +451,30 @@ describe('Fase 4 — Compás / ADHD Coach', () => {
     expect(draft!.answers.length).toBe(0);
   });
 
+  test('regresión: "recuérdame X" (NL del /help) → add_reminder', async () => {
+    // El /help promete: "recuérdame mañana a las 9 llamar al doctor".
+    // Antes caía a fallback porque no había rule NL para "recuérdame".
+    await adapter.receive('recuérdame mañana a las 9 llamar al doctor');
+    expect(adapter.last()).toMatch(/recordatorio guardado|listo/i);
+    expect(adapter.last()).not.toMatch(/no entend/i);
+    const list = await storage.adhdCoachStore.listReminders(user);
+    expect(list.length).toBe(1);
+  });
+
+  test('regresión: "recuerdame X" sin tilde también funciona', async () => {
+    await adapter.receive('recuerdame en 1h tomar agua');
+    expect(adapter.last()).toMatch(/recordatorio guardado|listo/i);
+  });
+
+  test('regresión: "ya fallé" → reencuadre, NO anti_abandono', async () => {
+    // El contrato de Fase 4 mueve "ya fallé" a reencuadre (pensamiento
+    // automático negativo, no decisión de abandonar). Antes "ya falle"
+    // estaba en la regex de anti_abandono y ganaba por orden.
+    await adapter.receive('ya fallé');
+    expect(adapter.last()).toMatch(/hip[óo]tesis|sentencia|frase exacta/i);
+    expect(adapter.last()).not.toMatch(/antes de abandonar/i);
+  });
+
   test('regresión: comandos con tilde resuelven (autocorrector móvil)', async () => {
     // En producción el usuario tipeó "/oración" con tilde y cayó al fallback
     // porque el router hacía lookup exacto. Fix: resolveCommand también

@@ -1126,8 +1126,10 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
       // Reglas específicas; no incluyen frases ambiguas que el pre-filter
       // global de crisis ya intercepta ("no quiero seguir", "ya no quiero", etc.)
       {
+        // "ya falle" salió de aquí: en Fase 4 va a reencuadre (pensamiento
+        // automático, no abandono del hábito).
         patterns: [
-          /^(lo dejo|me rindo|me harte|esto no sirve|manana mejor|ya falle)$/,
+          /^(lo dejo|me rindo|me harte|esto no sirve|manana mejor)$/,
           /^me rindo(?:\s+con\s+.+)?$/,
           /\bno puedo mas con esto\b/,
         ],
@@ -1190,6 +1192,16 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
         action: 'add_reminder',
         extractParams: (_match, _normalized, rawText) => {
           const m = rawText.match(/^\/recordar\s*(.*)$/i);
+          return { spec: (m?.[1] ?? '').trim() };
+        },
+      },
+      // NL: "recuérdame X" / "recuerdame X" → add_reminder con spec=X
+      // (el /help promete esta frase: "recuérdame mañana a las 9 llamar al doctor")
+      {
+        patterns: [/^recuerdame\s+(.+)$/i],
+        action: 'add_reminder',
+        extractParams: (_match, _normalized, rawText) => {
+          const m = rawText.match(/^recu[eé]rdame\s+(.+)$/i);
           return { spec: (m?.[1] ?? '').trim() };
         },
       },
