@@ -714,12 +714,16 @@ describe('Capabilities Fase 3 — add/list/cancel', () => {
     const r = lastReply();
     expect(r).toMatch(/recordatorio guardado|recordatorio programado/i);
     expect(r).toContain('Tomar agua');
-    // Cero underscores sin escapar (causa de HTTP 400 silencioso en Telegram).
-    // Cualquier "_" debe ir precedido de "\".
-    const unescapedUnderscore = /(^|[^\\])_/m;
-    expect(r).not.toMatch(unescapedUnderscore);
-    // Sin asteriscos en pareo, sin backticks sueltos.
+    // El Markdown legacy de Telegram NO procesa "\_". La única forma segura
+    // es NO incluir "_" en absoluto (escapado o no). Lo mismo para asterisco
+    // suelto y backticks. Si esto se rompe, Telegram devuelve 400 y el
+    // adapter traga el mensaje → bot mudo en producción.
+    expect(r).not.toMatch(/_/);
     expect(r.match(/\*/g)?.length ?? 0).toBe(0);
+    expect(r.match(/`/g)?.length ?? 0).toBe(0);
+    // Tampoco debe contener el slash command que el bug anterior incluía.
+    expect(r).not.toMatch(/cancelar_recordatorio/);
+    expect(r).not.toMatch(/cancelar\\_recordatorio/);
   });
 
   test('regresión prod: confirmación tras completar draft es Markdown-safe', async () => {

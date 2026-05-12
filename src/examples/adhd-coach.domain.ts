@@ -1334,14 +1334,14 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
       };
     }
     const { id } = await this.store.addReminder(userId, parsed.text, parsed.dueAt.toISOString());
-    // Markdown-safe: escapamos el texto del usuario y el slash command para que
-    // un underscore (en el nombre o en "/cancelar_recordatorio") no rompa el
-    // parseo de Telegram y el adapter no tire el mensaje silenciosamente.
+    // Mensaje deliberadamente sin "_", "*", "`", "[" — el Markdown v1 legacy
+    // de Telegram NO procesa "\_" como literal, así que la única forma segura
+    // es no incluir esos caracteres. Slash command omitido por contener "_".
     return {
       success: true,
       message:
         `✅ Listo, recordatorio guardado: "${escapeMdV1(parsed.text)}" para ${formatLocalDateTime(parsed.dueAt.toISOString())}. ` +
-        `(id ${id}). Para cancelarlo: /cancelar\\_recordatorio ${id}.`,
+        `(id ${id})`,
     };
   }
 
