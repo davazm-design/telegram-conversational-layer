@@ -386,7 +386,7 @@ describe('Capabilities Fase 3 — add/list/cancel', () => {
 
   test('/recordar en 1h tomar agua → crea recordatorio', async () => {
     await adapter.receive('/recordar en 1h tomar agua');
-    expect(lastReply()).toMatch(/Recordatorio programado/);
+    expect(lastReply()).toMatch(/recordatorio guardado|recordatorio programado/i);
     expect(lastReply()).toContain('Tomar agua');
 
     const list = await storage.adhdCoachStore.listReminders(user);
@@ -410,7 +410,7 @@ describe('Capabilities Fase 3 — add/list/cancel', () => {
     // Usuario responde con hora → completa el recordatorio
     adapter.reset();
     await adapter.receive('9am');
-    expect(lastReply()).toMatch(/Te recuerdo "Llamar"/);
+    expect(lastReply()).toMatch(/te recuerdo "Llamar"/i);
 
     const list2 = await storage.adhdCoachStore.listReminders(user);
     expect(list2.length).toBe(1);
@@ -465,7 +465,7 @@ describe('Capabilities Fase 3 — add/list/cancel', () => {
 
     adapter.reset();
     await adapter.receive('8am');
-    expect(lastReply()).toMatch(/Te recuerdo "Llamar al doctor"/);
+    expect(lastReply()).toMatch(/te recuerdo "Llamar al doctor"/i);
 
     // Estado pendiente debe estar limpio
     const draft = await storage.adhdCoachStore.getPendingReminderDraft(user);
@@ -556,7 +556,7 @@ describe('Capabilities Fase 3 — add/list/cancel', () => {
     expect(lastReply()).toMatch(/A qué hora mañana/i);
     adapter.reset();
     await adapter.receive('9');
-    expect(lastReply()).toMatch(/Te recuerdo "Llamar al doctor"/);
+    expect(lastReply()).toMatch(/te recuerdo "Llamar al doctor"/i);
 
     // /privacidad refleja el conteo
     adapter.reset();
@@ -644,7 +644,7 @@ describe('Capabilities Fase 3 — add/list/cancel', () => {
 
   test('/recordar pasado mañana 10:30am ir al pediatra → crea recordatorio', async () => {
     await adapter.receive('/recordar pasado mañana 10:30am ir al pediatra');
-    expect(lastReply()).toMatch(/Recordatorio programado/);
+    expect(lastReply()).toMatch(/recordatorio guardado|recordatorio programado/i);
     expect(lastReply()).toContain('Ir al pediatra');
     const list = await storage.adhdCoachStore.listReminders(user);
     expect(list.length).toBe(1);
@@ -664,7 +664,7 @@ describe('Capabilities Fase 3 — add/list/cancel', () => {
     // Completa con "9am" → crea recordatorio para esa fecha
     adapter.reset();
     await adapter.receive('9am');
-    expect(lastReply()).toMatch(/Te recuerdo "Ir al pediatra"/);
+    expect(lastReply()).toMatch(/te recuerdo "Ir al pediatra"/i);
     const list2 = await storage.adhdCoachStore.listReminders(user);
     expect(list2.length).toBe(1);
   });
@@ -678,7 +678,7 @@ describe('Capabilities Fase 3 — add/list/cancel', () => {
 
     adapter.reset();
     await adapter.receive('9am');
-    expect(lastReply()).toMatch(/Te recuerdo "Ir al pediatra"/);
+    expect(lastReply()).toMatch(/te recuerdo "Ir al pediatra"/i);
   });
 
   test('/recordar 14/05 ir al pediatra (sin hora) → pide hora, completa con 9am', async () => {
@@ -689,13 +689,13 @@ describe('Capabilities Fase 3 — add/list/cancel', () => {
 
     adapter.reset();
     await adapter.receive('9am');
-    expect(lastReply()).toMatch(/Te recuerdo "Ir al pediatra"/);
+    expect(lastReply()).toMatch(/te recuerdo "Ir al pediatra"/i);
     expect(lastReply()).not.toMatch(/T\d{2}:\d{2}:\d{2}/); // sin ISO crudo
   });
 
   test('/recordar 2026-05-14 10:30 ir al pediatra → crea recordatorio', async () => {
     await adapter.receive('/recordar 2026-05-14 10:30 ir al pediatra');
-    expect(lastReply()).toMatch(/Recordatorio programado/);
+    expect(lastReply()).toMatch(/recordatorio guardado|recordatorio programado/i);
     expect(lastReply()).toContain('Ir al pediatra');
   });
 
@@ -706,6 +706,41 @@ describe('Capabilities Fase 3 — add/list/cancel', () => {
     expect(r).toMatch(/pasado mañana/);
     expect(r).toMatch(/jueves/);
     expect(r).toMatch(/14\/05|dd\/mm/);
+  });
+
+  // ─── Regresión prod: la confirmación de add NO debe ser muda ────────
+  test('regresión prod: confirmación de /recordar es Markdown-safe (visible)', async () => {
+    await adapter.receive('/recordar en 1h tomar agua');
+    const r = lastReply();
+    expect(r).toMatch(/recordatorio guardado|recordatorio programado/i);
+    expect(r).toContain('Tomar agua');
+    // Cero underscores sin escapar (causa de HTTP 400 silencioso en Telegram).
+    // Cualquier "_" debe ir precedido de "\".
+    const unescapedUnderscore = /(^|[^\\])_/m;
+    expect(r).not.toMatch(unescapedUnderscore);
+    // Sin asteriscos en pareo, sin backticks sueltos.
+    expect(r.match(/\*/g)?.length ?? 0).toBe(0);
+  });
+
+  test('regresión prod: confirmación tras completar draft es Markdown-safe', async () => {
+    await adapter.receive('/recordar mañana llamar a maria_perez');
+    adapter.reset();
+    await adapter.receive('9am');
+    const r = lastReply();
+    expect(r).toMatch(/te recuerdo/i);
+    // El texto del usuario tenía un "_": debe estar escapado.
+    expect(r).toContain('maria\\_perez');
+    const unescapedUnderscore = /(^|[^\\])_/m;
+    expect(r).not.toMatch(unescapedUnderscore);
+  });
+
+  test('regresión prod: cancelar recordatorio con "_" en texto NO se queda mudo', async () => {
+    await storage.adhdCoachStore.addReminder(user, 'pagar luz_2024', new Date(Date.now() + 3600_000).toISOString());
+    adapter.reset();
+    await adapter.receive('/cancelar_recordatorio 1');
+    const r = lastReply();
+    expect(r).toMatch(/Cancelado/);
+    expect(r).toContain('luz\\_2024');
   });
 
   test('fechas se muestran en hora LOCAL, nunca como ISO UTC crudo', async () => {

@@ -1303,7 +1303,7 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
         });
         return {
           success: true,
-          message: `🕒 ¿A qué hora mañana quieres que te recuerde "${parsed.text}"? (Ej: 9am, 15:00)`,
+          message: `🕒 ¿A qué hora mañana quieres que te recuerde "${escapeMdV1(parsed.text)}"? (Ej: 9am, 15:00)`,
         };
       }
       if (parsed.reason === 'date_needs_hour') {
@@ -1334,11 +1334,14 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
       };
     }
     const { id } = await this.store.addReminder(userId, parsed.text, parsed.dueAt.toISOString());
+    // Markdown-safe: escapamos el texto del usuario y el slash command para que
+    // un underscore (en el nombre o en "/cancelar_recordatorio") no rompa el
+    // parseo de Telegram y el adapter no tire el mensaje silenciosamente.
     return {
       success: true,
       message:
-        `⏰ Recordatorio programado: "${parsed.text}" para ${formatLocalDateTime(parsed.dueAt.toISOString())}. ` +
-        `(id ${id}) Si quieres cancelarlo, escribe /cancelar_recordatorio <número>.`,
+        `✅ Listo, recordatorio guardado: "${escapeMdV1(parsed.text)}" para ${formatLocalDateTime(parsed.dueAt.toISOString())}. ` +
+        `(id ${id}). Para cancelarlo: /cancelar\\_recordatorio ${id}.`,
     };
   }
 
@@ -1389,7 +1392,7 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
         message: `⚠️ No encontré el recordatorio #${idx}. Revisa la lista con /recordatorios.`,
       };
     }
-    return { success: true, message: `🗑️ Cancelado: "${cancelledText}".` };
+    return { success: true, message: `🗑️ Cancelado: "${escapeMdV1(cancelledText)}".` };
   }
 
   private async completeReminderWithTime(userId: string, params: Record<string, unknown>): Promise<ActionResult> {
@@ -1419,7 +1422,7 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
     return {
       success: true,
       message:
-        `⏰ Listo. Te recuerdo "${draft.text}" el ${formatLocalDateTime(due.toISOString())}. (id ${id})`,
+        `✅ Listo, te recuerdo "${escapeMdV1(draft.text)}" el ${formatLocalDateTime(due.toISOString())}. (id ${id})`,
     };
   }
 
@@ -1435,18 +1438,17 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
     }
     // Reconstruir los textos a partir de los IDs guardados
     const allPending = await this.store.listReminders(userId);
-    const lines: string[] = ['🔔 *Recordatorios acumulados durante silencio:*', ''];
-    // Como el resumen guarda IDs ya marcados como done, intentamos imprimirlos
-    // con sus textos a partir del log persistente. Para simplicidad,
-    // listamos los que aún están pendientes y mencionamos cuántos vencieron.
+    // Markdown-safe: sin asteriscos en el header, fechas en local, texto del
+    // usuario escapado (un "_" en un nombre rompía el render entero antes).
+    const lines: string[] = ['Recordatorios acumulados durante silencio:', ''];
     const idsSet = new Set(summary.reminderIds);
-    // Marcamos como hechos para que no vuelvan a sonar. Aquí ya están done.
     lines.push(`Tuviste ${summary.reminderIds.length} recordatorio(s) durante silencio. Ya fueron registrados como entregados.`);
     if (allPending.length > 0) {
       lines.push('', 'Pendientes a futuro:');
       allPending.forEach((r, i) => {
         if (!idsSet.has(r.id)) {
-          lines.push(`  ${i + 1}. ${r.text} — ${formatHasta(r.dueAt)}`);
+          const text = (r?.text && String(r.text).trim()) ? escapeMdV1(String(r.text).trim()) : '(sin texto)';
+          lines.push(`${i + 1}. ${text} — ${formatLocalDateTime(r?.dueAt)}`);
         }
       });
     }
@@ -1509,9 +1511,11 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
       const totalCount = list.length + (accumulated?.reminderIds.length ?? 0);
 
       if (totalCount === 1 && list.length === 1) {
-        // 1 solo recordatorio vencido y sin acumulación previa → enviar normal
+        // 1 solo recordatorio vencido y sin acumulación previa → enviar normal.
+        // Escape Markdown del texto del usuario para no romper el render.
         const r = list[0];
-        await send(userId, `🔔 Recordatorio: ${r.text}`);
+        const safeText = (r?.text && String(r.text).trim()) ? escapeMdV1(String(r.text).trim()) : '(sin texto)';
+        await send(userId, `🔔 Recordatorio: ${safeText}`);
         await this.store.markReminderDone(r.id);
         continue;
       }
