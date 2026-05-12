@@ -1,10 +1,19 @@
 /**
  * Example Domain: ADHD Coach
  *
- * Demonstrates that the conversational layer is domain-agnostic.
- * This domain helps users with ADHD manage focus, micro-tasks, and daily routines.
+ * Coach para personas con TDAH. Capabilities:
+ *  - Check-in diario, micro-tareas (≤15 min), Pomodoros, listado de foco, reset_day.
+ *  - Fase 2 (acercamiento al MVP conceptual de Compás):
+ *      • /silencio (con duración opcional)
+ *      • /privacidad
+ *      • Borrado total del estado (HIGH_RISK + confirmación)
+ *      • /abandonar (anti-abandono)
+ *      • /reinicio (sin culpa)
+ *      • /agenda (volcado en bruto + clasificación)
  *
- * Uses in-memory storage for simplicity.
+ * NO diagnostica, NO sustituye terapia. El pre-filter global de seguridad
+ * (src/security/crisis.detector.ts) intercepta crisis antes de que cualquier
+ * acción de este dominio se ejecute.
  */
 
 import {
@@ -17,6 +26,97 @@ import {
 
 import { IAdhdCoachStore } from '../core/storage/interfaces';
 
+// ─── Heurística ligera de clasificación de tareas ────────────────────────────
+// Keyword-based, sin NLP. Mismo criterio que el MVP conceptual.
+
+type Category = 'laboral' | 'personal' | 'mantenimiento' | 'espiritual' | 'otros';
+
+const CATEGORY_KEYWORDS: Record<Exclude<Category, 'otros'>, string[]> = {
+  laboral: [
+    'junta', 'juntas', 'reunion', 'reunión', 'propuesta', 'propuestas',
+    'correo', 'correos', 'email', 'emails', 'jefe', 'jefa', 'oficina',
+    'cliente', 'clientes', 'informe', 'informes', 'presentacion',
+    'presentación', 'deadline', 'entregable', 'proyecto', 'trabajo',
+    'reporte', 'reportes',
+  ],
+  personal: [
+    'ejercicio', 'gym', 'gimnasio', 'doctor', 'doctora', 'dentista',
+    'medico', 'médico', 'cita medica', 'cita médica',
+    'padre', 'madre', 'hijo', 'hija', 'pareja', 'familia',
+    'amigo', 'amiga', 'correr', 'caminar',
+  ],
+  mantenimiento: [
+    'pagar', 'factura', 'facturas', 'banco', 'cuenta', 'cuentas',
+    'tarjeta', 'tarjetas', 'mercado', 'supermercado', 'comprar',
+    'compra', 'lavar', 'limpieza', 'limpiar', 'ropa', 'comida',
+    'casa', 'mantenimiento', 'recibo', 'renta',
+  ],
+  espiritual: [
+    'orar', 'oracion', 'oración', 'rezar', 'meditar', 'meditacion',
+    'meditación', 'gratitud', 'silencio espiritual',
+    'examen de conciencia', 'misa', 'biblia', 'lectura espiritual',
+    'intencion del dia', 'intención del día',
+  ],
+};
+
+function stripAccentsLower(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/[áéíóúüÁÉÍÓÚÜ]/g, (c) =>
+      ({ á: 'a', é: 'e', í: 'i', ó: 'o', ú: 'u', ü: 'u',
+         Á: 'a', É: 'e', Í: 'i', Ó: 'o', Ú: 'u', Ü: 'u' } as Record<string, string>)[c] ?? c,
+    );
+}
+
+function classifyItem(item: string): Category {
+  const n = stripAccentsLower(item);
+  for (const cat of ['laboral', 'personal', 'mantenimiento', 'espiritual'] as const) {
+    for (const kw of CATEGORY_KEYWORDS[cat]) {
+      if (n.includes(kw)) return cat;
+    }
+  }
+  return 'otros';
+}
+
+function splitTaskDump(text: string): string[] {
+  return text
+    .split(/,|\s+y\s+/i)
+    .map((p) => p.trim())
+    .filter((p) => p.length > 0);
+}
+
+// ─── Parseo de duración para /silencio ───────────────────────────────────────
+
+function parseSilenceDuration(arg: string, now: Date = new Date()): Date {
+  const a = stripAccentsLower(arg ?? '').trim();
+
+  // "Xh" o "Xhoras" → now + X horas
+  const m = a.match(/^(\d+)\s*h(oras)?$/);
+  if (m) {
+    const h = parseInt(m[1], 10);
+    if (h > 0 && h < 168) {
+      return new Date(now.getTime() + h * 3600_000);
+    }
+  }
+
+  if (a === 'hoy') {
+    const today = new Date(now);
+    today.setHours(23, 59, 0, 0);
+    return today;
+  }
+
+  // "hasta manana", "manana", "" (default)
+  const tomorrow = new Date(now);
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  tomorrow.setHours(8, 0, 0, 0);
+  return tomorrow;
+}
+
+function formatHasta(iso: string): string {
+  // YYYY-MM-DD HH:MM (UTC implícito, formato simple y deterministic)
+  return iso.replace('T', ' ').slice(0, 16);
+}
+
 // ─── Domain Handler ─────────────────────────────────────────────────────────
 
 export class AdhdCoachDomainHandler implements IDomainHandler {
@@ -26,6 +126,7 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
 
   getCapabilities(): Capability[] {
     return [
+      // ── Capabilities existentes (sin cambios) ────────────────────────────
       {
         name: 'daily_checkin',
         description: 'Registra tu check-in diario y recibe motivación',
@@ -70,10 +171,65 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
       },
       {
         name: 'reset_day',
-        description: 'Reinicia todas las micro-tareas del día (irreversible)',
+        description: 'Reinicia las micro-tareas del día (irreversible)',
         parameters: {},
         riskLevel: RiskLevel.HIGH_RISK_ACTION,
         requiresConfirmation: true,
+      },
+
+      // ── Fase 2 ───────────────────────────────────────────────────────────
+      {
+        name: 'set_silence',
+        description: 'Activa modo silencio (no enviaré mensajes proactivos hasta que pase)',
+        parameters: {
+          duration: { type: 'string', description: 'Duración opcional: "2h", "hoy", "hasta mañana"' },
+        },
+        riskLevel: RiskLevel.LOW_RISK_WRITE,
+        requiresConfirmation: false,
+      },
+      {
+        name: 'show_privacy',
+        description: 'Muestra qué datos guarda el dominio sobre ti',
+        parameters: {},
+        riskLevel: RiskLevel.READ_ONLY,
+        requiresConfirmation: false,
+      },
+      {
+        name: 'delete_all_state',
+        description: 'Borra todo el estado guardado por este dominio (irreversible)',
+        parameters: {},
+        riskLevel: RiskLevel.HIGH_RISK_ACTION,
+        requiresConfirmation: true,
+      },
+      {
+        name: 'anti_abandono',
+        description: 'Pausa antes de abandonar una tarea/hábito',
+        parameters: {},
+        riskLevel: RiskLevel.READ_ONLY,
+        requiresConfirmation: false,
+      },
+      {
+        name: 'restart_no_guilt',
+        description: 'Reinicio sin culpa tras un parón o racha rota',
+        parameters: {},
+        riskLevel: RiskLevel.READ_ONLY,
+        requiresConfirmation: false,
+      },
+      {
+        name: 'agenda_start',
+        description: 'Invita a volcar el día en bruto para ordenarlo',
+        parameters: {},
+        riskLevel: RiskLevel.READ_ONLY,
+        requiresConfirmation: false,
+      },
+      {
+        name: 'agenda_classify',
+        description: 'Clasifica un volcado de tareas en categorías',
+        parameters: {
+          dump: { type: 'string', description: 'Lista en bruto separada por comas o "y"', required: true },
+        },
+        riskLevel: RiskLevel.LOW_RISK_WRITE,
+        requiresConfirmation: false,
       },
     ];
   }
@@ -83,11 +239,18 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
       '/checkin': 'daily_checkin',
       '/focus': 'list_today_focus',
       '/pomodoro': 'start_focus_session',
+      // Fase 2 (sin args)
+      '/privacidad': 'show_privacy',
+      '/abandonar': 'anti_abandono',
+      '/reinicio': 'restart_no_guilt',
+      '/agenda': 'agenda_start',
+      // NOTA: /silencio no se mapea aquí porque la rule captura su duración opcional.
     };
   }
 
   getRules(): RulePattern[] {
     return [
+      // ── Reglas existentes ────────────────────────────────────────────────
       {
         patterns: [/^(check.?in|buenos dias|buen dia|ya estoy|llegue|presente)$/],
         action: 'daily_checkin',
@@ -119,6 +282,73 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
           return { taskId: match[2] ?? '1' };
         },
       },
+
+      // ── Fase 2 — /silencio (con duración opcional) ───────────────────────
+      {
+        patterns: [/^\/silencio(?:\s+(.+))?$/],
+        action: 'set_silence',
+        extractParams: (match) => ({ duration: (match[1] ?? '').trim() }),
+      },
+      {
+        // NL: "dejame en paz", "no me escribas", "silencio hoy", etc.
+        patterns: [
+          /^(dejame en paz|no me escribas|silencio por hoy|silencio hoy|necesito silencio)$/,
+        ],
+        action: 'set_silence',
+        extractParams: () => ({ duration: '' }),
+      },
+
+      // ── Fase 2 — /privacidad NL ──────────────────────────────────────────
+      {
+        patterns: [
+          /^(que sabes de mi|que guardas|ver mis datos|que datos tienes|que datos guardas)$/,
+        ],
+        action: 'show_privacy',
+      },
+
+      // ── Fase 2 — Borrado ─────────────────────────────────────────────────
+      {
+        patterns: [
+          /^(borrar todo|borralo todo|elimina mis datos|borra lo que sabes(?: de mi)?|elimina todo lo que tienes)$/,
+        ],
+        action: 'delete_all_state',
+      },
+
+      // ── Fase 2 — Anti-abandono ───────────────────────────────────────────
+      // Reglas específicas; no incluyen frases ambiguas que el pre-filter
+      // global de crisis ya intercepta ("no quiero seguir", "ya no quiero", etc.)
+      {
+        patterns: [
+          /^(lo dejo|me rindo|me harte|esto no sirve|manana mejor|ya falle)$/,
+          /^me rindo(?:\s+con\s+.+)?$/,
+          /\bno puedo mas con esto\b/,
+        ],
+        action: 'anti_abandono',
+      },
+
+      // ── Fase 2 — Reinicio ────────────────────────────────────────────────
+      {
+        patterns: [
+          /^(falle|rompi la racha|no hice nada|abandone(?:\s+la racha)?)$/,
+        ],
+        action: 'restart_no_guilt',
+      },
+
+      // ── Fase 2 — Agenda en lenguaje natural ─────────────────────────────
+      {
+        patterns: [
+          /^(organiza mi dia|ordena mi dia|ayudame con el dia)$/,
+        ],
+        action: 'agenda_start',
+      },
+      {
+        // 3+ items separados por comas o " y " → clasificar
+        patterns: [
+          /^[^,]+,\s*[^,]+,[^,]+/,
+        ],
+        action: 'agenda_classify',
+        extractParams: (_match, _normalized, rawText) => ({ dump: rawText }),
+      },
     ];
   }
 
@@ -136,6 +366,21 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
         return await this.completeMicroTask(userId, params);
       case 'reset_day':
         return await this.resetDay(userId);
+      // ── Fase 2 ──
+      case 'set_silence':
+        return await this.setSilence(userId, params);
+      case 'show_privacy':
+        return await this.showPrivacy(userId);
+      case 'delete_all_state':
+        return await this.deleteAllState(userId);
+      case 'anti_abandono':
+        return this.antiAbandono();
+      case 'restart_no_guilt':
+        return this.restartNoGuilt();
+      case 'agenda_start':
+        return this.agendaStart();
+      case 'agenda_classify':
+        return await this.agendaClassify(userId, params);
       default:
         return { success: false, message: `Acción "${action}" no implementada en ADHD Coach.` };
     }
@@ -147,11 +392,20 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
     const done = tasks.filter((t) => t.completed).length;
     const sessions = await this.store.getFocusSessions(userId);
     const session = sessions.length > 0 ? sessions[sessions.length - 1] : null;
-    const focusStatus = session ? `🎯 En foco: "${session.task}"` : '💤 Sin sesión activa';
-    return `Micro-tareas: ${pending} pendientes, ${done} completadas. ${focusStatus}`;
+    const silence = await this.store.getSilenceUntil(userId);
+    const parts: string[] = [];
+    parts.push(`Micro-tareas: ${pending} pendientes, ${done} completadas.`);
+    parts.push(session ? `🎯 En foco: "${session.task}"` : '💤 Sin sesión activa');
+    if (silence) {
+      const until = new Date(silence);
+      if (until.getTime() > Date.now()) {
+        parts.push(`🔕 Silencio hasta ${formatHasta(silence)}`);
+      }
+    }
+    return parts.join(' ');
   }
 
-  // ─── Action Implementations ─────────────────────────────────────────────
+  // ─── Existing actions (sin cambios funcionales) ────────────────────────
 
   private async dailyCheckin(userId: string): Promise<ActionResult> {
     const today = new Date().toISOString().split('T')[0];
@@ -271,5 +525,120 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
     const count = tasks.length;
     await this.store.resetDay(userId);
     return { success: true, message: `🗑️ ${count} micro-tarea(s) eliminada(s). Sesión de foco reiniciada. Día limpio. 🧘` };
+  }
+
+  // ─── Fase 2: nuevas acciones ────────────────────────────────────────────
+
+  private async setSilence(userId: string, params: Record<string, unknown>): Promise<ActionResult> {
+    const duration = String(params.duration ?? '').trim();
+    const until = parseSilenceDuration(duration);
+    const iso = until.toISOString();
+    await this.store.setSilenceUntil(userId, iso);
+    return {
+      success: true,
+      message: `🔕 Modo silencio hasta ${formatHasta(iso)}. Te respondo si me escribes, pero no te molestaré.`,
+    };
+  }
+
+  private async showPrivacy(userId: string): Promise<ActionResult> {
+    const tasks = await this.store.getMicroTasks(userId);
+    const sessions = await this.store.getFocusSessions(userId);
+    const checkins = await this.store.getCheckins(userId);
+    const silence = await this.store.getSilenceUntil(userId);
+
+    const lines: string[] = ['Esto es lo que guardo ahora:', ''];
+    // Contexto: nota intencional, NO lenguaje clínico ("diagnóstico" prohibido).
+    lines.push('- Contexto declarado por ti: TDAH.');
+    if (tasks.length > 0 || checkins.length > 0) {
+      const pending = tasks.filter((t) => !t.completed).length;
+      const done = tasks.filter((t) => t.completed).length;
+      lines.push(`- Estado de tareas/microtareas: ${pending} pendientes, ${done} completadas, ${checkins.length} check-in(s).`);
+    } else {
+      lines.push('- Estado de tareas/microtareas: sin registros todavía.');
+    }
+    const activeSession = sessions[sessions.length - 1];
+    if (activeSession) {
+      lines.push(`- Sesión de enfoque activa: "${activeSession.task}".`);
+    } else {
+      lines.push('- Sesión de enfoque activa: ninguna.');
+    }
+    if (silence) {
+      const until = new Date(silence);
+      if (until.getTime() > Date.now()) {
+        lines.push(`- Modo silencio: hasta ${formatHasta(silence)}.`);
+      } else {
+        lines.push('- Modo silencio: no activo.');
+      }
+    } else {
+      lines.push('- Modo silencio: no activo.');
+    }
+    lines.push('- Preferencias básicas: ninguna registrada todavía.');
+    lines.push('');
+    lines.push('Opciones: A) borrar todo, B) borrar una parte, C) cambiar consentimientos.');
+
+    return { success: true, message: lines.join('\n') };
+  }
+
+  private async deleteAllState(userId: string): Promise<ActionResult> {
+    await this.store.resetAllUserState(userId);
+    return {
+      success: true,
+      message:
+        '🗑️ Hecho. Borré el estado que este dominio guardaba sobre ti. ' +
+        'Si la plataforma conserva logs técnicos, no los usaré para personalizar respuestas.',
+    };
+  }
+
+  private antiAbandono(): ActionResult {
+    return {
+      success: true,
+      message:
+        'Antes de abandonar, hagamos una pausa. ¿Esto es cansancio, miedo, frustración o que realmente ya no tiene sentido? ' +
+        'Luego eliges: A) 2 minutos, B) reprogramar, C) cerrar conscientemente.',
+    };
+  }
+
+  private restartNoGuilt(): ActionResult {
+    return {
+      success: true,
+      message:
+        'Romper una racha no borra lo aprendido. Hoy reinicio mínimo: una prioridad, una acción de 2 minutos y cierre. ' +
+        '¿Cuál es la prioridad?',
+    };
+  }
+
+  private agendaStart(): ActionResult {
+    return {
+      success: true,
+      message:
+        'Vamos a ordenar el día. Vuélcame lo que tienes en bruto; yo lo separo en laboral, personal, mantenimiento, espiritual y otros.',
+    };
+  }
+
+  private async agendaClassify(userId: string, params: Record<string, unknown>): Promise<ActionResult> {
+    const dump = String(params.dump ?? '').trim();
+    if (!dump) {
+      return { success: false, message: '⚠️ Necesito el volcado de tareas (separadas por comas o "y").' };
+    }
+    const items = splitTaskDump(dump);
+    if (items.length === 0) {
+      return { success: false, message: '⚠️ No pude leer ninguna tarea. Sepáralas por comas o "y".' };
+    }
+
+    const buckets: Record<Category, string[]> = {
+      laboral: [], personal: [], mantenimiento: [], espiritual: [], otros: [],
+    };
+    for (const it of items) buckets[classifyItem(it)].push(it);
+
+    const lines: string[] = ['Lo separé así:'];
+    if (buckets.laboral.length)       lines.push(`- Laboral: ${buckets.laboral.join(', ')}.`);
+    if (buckets.personal.length)      lines.push(`- Personal: ${buckets.personal.join(', ')}.`);
+    if (buckets.mantenimiento.length) lines.push(`- Mantenimiento: ${buckets.mantenimiento.join(', ')}.`);
+    if (buckets.espiritual.length)    lines.push(`- Espiritual: ${buckets.espiritual.join(', ')}.`);
+    if (buckets.otros.length)         lines.push(`- Otros: ${buckets.otros.join(', ')}.`);
+    lines.push('');
+    lines.push('¿Eliges 3 importantes y 1 de mantenimiento para hoy?');
+
+    return { success: true, message: lines.join('\n') };
   }
 }

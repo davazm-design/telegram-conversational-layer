@@ -56,6 +56,7 @@ class MemoryAdhdCoachStore implements IAdhdCoachStore {
   private checkins = new Map<string, { date: string; completed: boolean }[]>();
   private microTasks = new Map<string, { id: string; text: string; completed: boolean }[]>();
   private focusSessions = new Map<string, { task: string; completed: boolean }[]>();
+  private silenceUntil = new Map<string, string>();
   private key(userId: string) { return `${this.domainId}:${userId}`; }
 
   async getCheckins(userId: string) { return this.checkins.get(this.key(userId)) ?? []; }
@@ -92,6 +93,24 @@ class MemoryAdhdCoachStore implements IAdhdCoachStore {
     this.checkins.delete(this.key(userId));
     this.microTasks.delete(this.key(userId));
     this.focusSessions.delete(this.key(userId));
+  }
+
+  async getSilenceUntil(userId: string) {
+    return this.silenceUntil.get(this.key(userId)) ?? null;
+  }
+  async setSilenceUntil(userId: string, isoUntil: string) {
+    this.silenceUntil.set(this.key(userId), isoUntil);
+  }
+  async clearSilenceUntil(userId: string) {
+    this.silenceUntil.delete(this.key(userId));
+  }
+
+  async resetAllUserState(userId: string) {
+    const k = this.key(userId);
+    this.checkins.delete(k);
+    this.microTasks.delete(k);
+    this.focusSessions.delete(k);
+    this.silenceUntil.delete(k);
   }
 }
 

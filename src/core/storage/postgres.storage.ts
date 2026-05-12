@@ -102,7 +102,45 @@ class PostgresAdhdCoachStore implements IAdhdCoachStore {
   }
 
   async resetDay(userId: string) {
-    await this.pool.query('DELETE FROM adhd_items WHERE domain_id = $1 AND user_id = $2', [this.domainId, userId]);
+    // Mantiene el comportamiento previo: clear de checkins/microtasks/focus
+    // del usuario. NO toca silence_until (ese se borra solo con resetAllUserState).
+    await this.pool.query(
+      `DELETE FROM adhd_items WHERE domain_id = $1 AND user_id = $2 AND type IN ('checkin','microtask','focus')`,
+      [this.domainId, userId]
+    );
+  }
+
+  async getSilenceUntil(userId: string): Promise<string | null> {
+    const res = await this.pool.query(
+      `SELECT date FROM adhd_items WHERE domain_id = $1 AND user_id = $2 AND type = 'silence_until' ORDER BY created_at DESC LIMIT 1`,
+      [this.domainId, userId]
+    );
+    return res.rows[0]?.date ?? null;
+  }
+  async setSilenceUntil(userId: string, isoUntil: string): Promise<void> {
+    // Reemplazo idempotente: borra previo + inserta nuevo en una transacción ligera.
+    await this.pool.query(
+      `DELETE FROM adhd_items WHERE domain_id = $1 AND user_id = $2 AND type = 'silence_until'`,
+      [this.domainId, userId]
+    );
+    await this.pool.query(
+      `INSERT INTO adhd_items (domain_id, user_id, type, date, completed) VALUES ($1, $2, 'silence_until', $3, true)`,
+      [this.domainId, userId, isoUntil]
+    );
+  }
+  async clearSilenceUntil(userId: string): Promise<void> {
+    await this.pool.query(
+      `DELETE FROM adhd_items WHERE domain_id = $1 AND user_id = $2 AND type = 'silence_until'`,
+      [this.domainId, userId]
+    );
+  }
+
+  async resetAllUserState(userId: string): Promise<void> {
+    // Borra TODO lo que el dominio guarda para el usuario.
+    await this.pool.query(
+      `DELETE FROM adhd_items WHERE domain_id = $1 AND user_id = $2`,
+      [this.domainId, userId]
+    );
   }
 }
 
