@@ -451,6 +451,27 @@ describe('Fase 4 — Compás / ADHD Coach', () => {
     expect(draft!.answers.length).toBe(0);
   });
 
+  test('regresión: comandos con tilde resuelven (autocorrector móvil)', async () => {
+    // En producción el usuario tipeó "/oración" con tilde y cayó al fallback
+    // porque el router hacía lookup exacto. Fix: resolveCommand también
+    // intenta sin acentos. Cubre /oración, /procrastinación, /revisión.
+    await adapter.receive('/oración');
+    expect(adapter.last()).toMatch(/oramos|se[ñn]or|amén/i);
+
+    adapter.reset();
+    await adapter.receive('/procrastinación');
+    expect(adapter.last()).toMatch(/alivio r[áa]pido|reducir la amenaza/i);
+
+    adapter.reset();
+    await adapter.receive('/revisión');
+    expect(adapter.last()).toMatch(/qu[eé] se repiti[óo]/i);
+
+    // Sin tilde sigue funcionando.
+    adapter.reset();
+    await adapter.receive('/oracion');
+    expect(adapter.last()).toMatch(/oramos|se[ñn]or|amén/i);
+  });
+
   test('extra: slash command escapa flow durante TCC', async () => {
     await adapter.receive('/rpec');
     adapter.reset();

@@ -19,7 +19,7 @@
 import { GenericMessage, ResolvedIntent, IntentSource, Capability, RulePattern } from '../core/types';
 import { LLMFallback } from '../llm/llm.fallback';
 import { logger } from '../core/logger';
-import { normalizeForMatching } from './text.normalizer';
+import { normalizeForMatching, stripAccents } from './text.normalizer';
 
 const COMPONENT = 'IntentRouter';
 
@@ -160,8 +160,11 @@ export class IntentRouter {
   }
 
   private resolveCommand(text: string): string | null {
-    const command = text.split(' ')[0].toLowerCase();
-    return this.commands[command] ?? null;
+    const raw = text.split(' ')[0].toLowerCase();
+    // Match exact primero. Si falla, intenta sin acentos para tolerar
+    // autocorrectores que insertan tildes (ej: "/oración" → "/oracion",
+    // "/procrastinación" → "/procrastinacion", "/revisión" → "/revision").
+    return this.commands[raw] ?? this.commands[stripAccents(raw)] ?? null;
   }
 
   private resolveRule(normalizedText: string, rawText: string): ResolvedIntent | null {
