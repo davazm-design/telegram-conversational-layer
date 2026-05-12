@@ -142,6 +142,127 @@ class PostgresAdhdCoachStore implements IAdhdCoachStore {
       [this.domainId, userId]
     );
   }
+
+  // ── Fase 3: reminders ────────────────────────────────────────────────
+
+  async addReminder(userId: string, text: string, dueAtIso: string): Promise<{ id: string }> {
+    const res = await this.pool.query(
+      `INSERT INTO adhd_items (domain_id, user_id, type, text, date, completed)
+       VALUES ($1, $2, 'reminder', $3, $4, false) RETURNING id`,
+      [this.domainId, userId, text, dueAtIso]
+    );
+    return { id: String(res.rows[0].id) };
+  }
+
+  async listReminders(userId: string) {
+    const res = await this.pool.query(
+      `SELECT id, text, date FROM adhd_items
+       WHERE domain_id = $1 AND user_id = $2 AND type = 'reminder' AND completed = false
+       ORDER BY date ASC`,
+      [this.domainId, userId]
+    );
+    return res.rows.map((r) => ({ id: String(r.id), text: r.text, dueAt: r.date }));
+  }
+
+  async cancelReminderByIndex(userId: string, index1Based: number): Promise<string | null> {
+    const pending = await this.listReminders(userId);
+    if (index1Based < 1 || index1Based > pending.length) return null;
+    const target = pending[index1Based - 1];
+    await this.pool.query(
+      `UPDATE adhd_items SET completed = true WHERE id = $1 AND domain_id = $2`,
+      [target.id, this.domainId]
+    );
+    return target.text;
+  }
+
+  async getDueRemindersAllUsers(nowIso: string) {
+    const res = await this.pool.query(
+      `SELECT id, user_id, text, date FROM adhd_items
+       WHERE domain_id = $1 AND type = 'reminder' AND completed = false AND date <= $2
+       ORDER BY date ASC`,
+      [this.domainId, nowIso]
+    );
+    return res.rows.map((r) => ({
+      id: String(r.id), userId: r.user_id, text: r.text, dueAt: r.date,
+    }));
+  }
+
+  async markReminderDone(reminderId: string): Promise<void> {
+    await this.pool.query(
+      `UPDATE adhd_items SET completed = true WHERE id = $1 AND domain_id = $2`,
+      [reminderId, this.domainId]
+    );
+  }
+
+  async postponeReminder(reminderId: string, newDueAtIso: string): Promise<void> {
+    await this.pool.query(
+      `UPDATE adhd_items SET date = $1 WHERE id = $2 AND domain_id = $3`,
+      [newDueAtIso, reminderId, this.domainId]
+    );
+  }
+
+  // Drafts: type='reminder_draft', text=texto, date=dayHint. Único por usuario:
+  // borrar-antes-insertar para idempotencia.
+  async setPendingReminderDraft(
+    userId: string,
+    draft: { text: string; dayHint: 'tomorrow' | 'today' | 'unspecified' },
+  ): Promise<void> {
+    await this.pool.query(
+      `DELETE FROM adhd_items WHERE domain_id = $1 AND user_id = $2 AND type = 'reminder_draft'`,
+      [this.domainId, userId]
+    );
+    await this.pool.query(
+      `INSERT INTO adhd_items (domain_id, user_id, type, text, date, completed)
+       VALUES ($1, $2, 'reminder_draft', $3, $4, false)`,
+      [this.domainId, userId, draft.text, draft.dayHint]
+    );
+  }
+  async getPendingReminderDraft(userId: string) {
+    const res = await this.pool.query(
+      `SELECT text, date FROM adhd_items
+       WHERE domain_id = $1 AND user_id = $2 AND type = 'reminder_draft'
+       ORDER BY created_at DESC LIMIT 1`,
+      [this.domainId, userId]
+    );
+    if (res.rows.length === 0) return null;
+    return { text: res.rows[0].text, dayHint: res.rows[0].date as 'tomorrow' | 'today' | 'unspecified' };
+  }
+  async clearPendingReminderDraft(userId: string): Promise<void> {
+    await this.pool.query(
+      `DELETE FROM adhd_items WHERE domain_id = $1 AND user_id = $2 AND type = 'reminder_draft'`,
+      [this.domainId, userId]
+    );
+  }
+
+  // Overdue summary: type='reminder_overdue_summary', text=JSON(reminderIds).
+  async setPendingOverdueSummary(userId: string, reminderIds: string[]): Promise<void> {
+    await this.pool.query(
+      `DELETE FROM adhd_items WHERE domain_id = $1 AND user_id = $2 AND type = 'reminder_overdue_summary'`,
+      [this.domainId, userId]
+    );
+    await this.pool.query(
+      `INSERT INTO adhd_items (domain_id, user_id, type, text, completed)
+       VALUES ($1, $2, 'reminder_overdue_summary', $3, false)`,
+      [this.domainId, userId, JSON.stringify(reminderIds)]
+    );
+  }
+  async getPendingOverdueSummary(userId: string) {
+    const res = await this.pool.query(
+      `SELECT text FROM adhd_items
+       WHERE domain_id = $1 AND user_id = $2 AND type = 'reminder_overdue_summary'
+       ORDER BY created_at DESC LIMIT 1`,
+      [this.domainId, userId]
+    );
+    if (res.rows.length === 0) return null;
+    try { return { reminderIds: JSON.parse(res.rows[0].text) as string[] }; }
+    catch { return null; }
+  }
+  async clearPendingOverdueSummary(userId: string): Promise<void> {
+    await this.pool.query(
+      `DELETE FROM adhd_items WHERE domain_id = $1 AND user_id = $2 AND type = 'reminder_overdue_summary'`,
+      [this.domainId, userId]
+    );
+  }
 }
 
 export class PostgresStorageProvider implements IStorageProvider {

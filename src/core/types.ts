@@ -146,6 +146,16 @@ export interface IDomainHandler {
    * These are checked at Level 2 of the intent router.
    */
   getRules?(): RulePattern[];
+
+  /**
+   * Optional: Proactive tick driver. The orchestrator host calls this on a
+   * fixed interval (e.g. 60s) so the domain can dispatch scheduled events
+   * (reminders, nudges, etc.) without coupling to the adapter.
+   *
+   * IMPORTANT: proactive messages bypass the crisis pre-filter on purpose
+   * (the pre-filter exists to intercept user inputs, not outbound nudges).
+   */
+  tick?(send: (userId: string, text: string) => Promise<void>): Promise<void>;
 }
 
 // ─── LLM Provider ────────────────────────────────────────────────────────────

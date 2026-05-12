@@ -104,6 +104,16 @@ export class Orchestrator {
     logger.info(COMPONENT, 'Orchestrator stopped.');
   }
 
+  /**
+   * Envía un mensaje proactivo (sin pasar por el pipeline de entrada).
+   * Usado por el tick del dominio para recordatorios programados.
+   */
+  async sendProactive(userId: string, text: string): Promise<void> {
+    // Convención actual: chatId === userId para Telegram personal.
+    // Si en el futuro divergen, el dominio debería persistir su propio mapping.
+    await this.adapter.sendResponse({ chatId: userId, text, parseMode: 'Markdown' });
+  }
+
   private async handleMessage(msg: GenericMessage): Promise<void> {
     try {
       // ── Step -1: A5 Crisis pre-filter (system-wide, all domains) ────────
@@ -318,9 +328,27 @@ async function main(): Promise<void> {
   const adapter = new TelegramAdapter(config);
   const orchestrator = new Orchestrator(adapter, domain, config, storage.sessionStore);
 
+  // ── Proactive tick driver (recordatorios, nudges) ────────────────────────
+  // El dominio expone tick(send) opcional. Lo llamamos cada 60s.
+  // Si el dominio no implementa tick, se omite.
+  let tickTimer: NodeJS.Timeout | null = null;
+  if (typeof domain.tick === 'function') {
+    const TICK_MS = 60_000;
+    const runTick = async () => {
+      try {
+        await domain.tick!((uid, text) => orchestrator.sendProactive(uid, text));
+      } catch (err) {
+        logger.error(COMPONENT, 'Tick failed', { error: String(err) });
+      }
+    };
+    tickTimer = setInterval(runTick, TICK_MS);
+    logger.info(COMPONENT, `Proactive tick enabled (${TICK_MS} ms).`);
+  }
+
   // Graceful shutdown
   const shutdown = async () => {
     logger.info(COMPONENT, 'Shutting down...');
+    if (tickTimer) clearInterval(tickTimer);
     await orchestrator.stop();
     await storage.disconnect();
     process.exit(0);

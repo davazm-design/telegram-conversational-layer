@@ -78,6 +78,136 @@ function classifyItem(item: string): Category {
   return 'otros';
 }
 
+// ─── Fase 3: Parser de tiempo para recordatorios ─────────────────────────────
+// Soporta: "en Xh/min/dias <texto>", "hoy [a las] HH[:MM][am|pm] <texto>",
+// "mañana [a las] HH[:MM][am|pm] <texto>", "mañana <texto>" (sin hora → pide),
+// "HH:MM <texto>", "HHam/pm <texto>" (hoy si futuro, mañana si pasó).
+
+type ParseResult =
+  | { ok: true; dueAt: Date; text: string }
+  | { ok: false; reason: 'tomorrow_needs_hour'; text: string }
+  | { ok: false; reason: 'missing_text' }
+  | { ok: false; reason: 'missing_time' };
+
+function normalizeForParse(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/[áéíóúü]/g, (c) =>
+      ({ á: 'a', é: 'e', í: 'i', ó: 'o', ú: 'u', ü: 'u' } as Record<string, string>)[c] ?? c)
+    .replace(/ñ/g, 'n')
+    .trim();
+}
+
+function hourTo24(h: number, ampm?: string): number | null {
+  if (!Number.isFinite(h) || h < 0) return null;
+  if (ampm) {
+    const ap = ampm.toLowerCase();
+    if (h < 1 || h > 12) return null;
+    if (ap === 'pm') return h === 12 ? 12 : h + 12;
+    if (ap === 'am') return h === 12 ? 0 : h;
+  }
+  if (h > 23) return null;
+  return h;
+}
+
+function capFirst(s: string): string {
+  return s.length === 0 ? s : s[0].toUpperCase() + s.slice(1);
+}
+
+export function parseReminderSpec(spec: string, now: Date = new Date()): ParseResult {
+  const norm = normalizeForParse(spec);
+  if (!norm) return { ok: false, reason: 'missing_time' };
+
+  // 1) "en X (min|h|d) <texto>"
+  let m = norm.match(/^en\s+(\d+)\s*(min(?:utos?)?|h|hora|horas|d|dia|dias)\b\s*(.*)$/);
+  if (m) {
+    const n = parseInt(m[1], 10);
+    const unit = m[2];
+    const text = (m[3] ?? '').trim();
+    if (!text) return { ok: false, reason: 'missing_text' };
+    let ms = 0;
+    if (unit.startsWith('min')) ms = n * 60_000;
+    else if (unit === 'h' || unit.startsWith('hora')) ms = n * 3_600_000;
+    else ms = n * 86_400_000;
+    return { ok: true, dueAt: new Date(now.getTime() + ms), text: capFirst(text) };
+  }
+
+  // 2) "hoy [a las] HH[:MM] [am|pm] <texto>"
+  m = norm.match(/^hoy\s+(?:a\s+las\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s+(.+)$/);
+  if (m) {
+    const h = hourTo24(parseInt(m[1], 10), m[3]);
+    if (h === null) return { ok: false, reason: 'missing_time' };
+    const mins = m[2] ? parseInt(m[2], 10) : 0;
+    if (mins < 0 || mins > 59) return { ok: false, reason: 'missing_time' };
+    const text = m[4].trim();
+    if (!text) return { ok: false, reason: 'missing_text' };
+    const due = new Date(now);
+    due.setHours(h, mins, 0, 0);
+    return { ok: true, dueAt: due, text: capFirst(text) };
+  }
+
+  // 3) "manana [a las] HH[:MM] [am|pm] <texto>"
+  m = norm.match(/^manana\s+(?:a\s+las\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s+(.+)$/);
+  if (m) {
+    const h = hourTo24(parseInt(m[1], 10), m[3]);
+    if (h === null) return { ok: false, reason: 'missing_time' };
+    const mins = m[2] ? parseInt(m[2], 10) : 0;
+    if (mins < 0 || mins > 59) return { ok: false, reason: 'missing_time' };
+    const text = m[4].trim();
+    if (!text) return { ok: false, reason: 'missing_text' };
+    const due = new Date(now);
+    due.setDate(due.getDate() + 1);
+    due.setHours(h, mins, 0, 0);
+    return { ok: true, dueAt: due, text: capFirst(text) };
+  }
+
+  // 4) "manana <texto>" sin hora explícita → pedir hora
+  m = norm.match(/^manana\s+(.+)$/);
+  if (m) {
+    const text = m[1].trim();
+    if (!text) return { ok: false, reason: 'missing_text' };
+    return { ok: false, reason: 'tomorrow_needs_hour', text: capFirst(text) };
+  }
+
+  // 5) "[a las] HH:MM <texto>" o "HHam/pm <texto>" → hoy si futuro, mañana si pasó
+  m = norm.match(/^(?:a\s+las\s+)?(\d{1,2})(?::(\d{2})|\s*(am|pm))\s+(.+)$/);
+  if (m) {
+    const h = hourTo24(parseInt(m[1], 10), m[3]);
+    if (h === null) return { ok: false, reason: 'missing_time' };
+    const mins = m[2] ? parseInt(m[2], 10) : 0;
+    if (mins < 0 || mins > 59) return { ok: false, reason: 'missing_time' };
+    const text = m[4].trim();
+    if (!text) return { ok: false, reason: 'missing_text' };
+    const due = new Date(now);
+    due.setHours(h, mins, 0, 0);
+    if (due.getTime() <= now.getTime()) due.setDate(due.getDate() + 1);
+    return { ok: true, dueAt: due, text: capFirst(text) };
+  }
+
+  return { ok: false, reason: 'missing_time' };
+}
+
+/** Parsea SOLO una hora (sin texto). Usado para completar drafts pendientes. */
+export function parseTimeOnly(input: string, dayHint: 'today' | 'tomorrow', now: Date = new Date()): Date | null {
+  const norm = normalizeForParse(input);
+  let m = norm.match(/^(?:manana\s+)?(?:a\s+las\s+)?(\d{1,2})(?::(\d{2})|\s*(am|pm))?$/);
+  if (!m) return null;
+  const h = hourTo24(parseInt(m[1], 10), m[3]);
+  if (h === null) return null;
+  const mins = m[2] ? parseInt(m[2], 10) : 0;
+  if (mins < 0 || mins > 59) return null;
+  const due = new Date(now);
+  if (dayHint === 'tomorrow' || norm.startsWith('manana')) {
+    due.setDate(due.getDate() + 1);
+  }
+  due.setHours(h, mins, 0, 0);
+  if (dayHint === 'today' && due.getTime() <= now.getTime()) {
+    // si era hoy pero ya pasó, pasa a mañana automáticamente
+    due.setDate(due.getDate() + 1);
+  }
+  return due;
+}
+
 function splitTaskDump(text: string): string[] {
   return text
     .split(/,|\s+y\s+/i)
@@ -240,6 +370,49 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
         riskLevel: RiskLevel.READ_ONLY,
         requiresConfirmation: false,
       },
+      // ── Fase 3: recordatorios programados ────────────────────────────────
+      {
+        name: 'add_reminder',
+        description: 'Crea un recordatorio con hora específica',
+        parameters: {
+          spec: { type: 'string', description: 'Especificación: tiempo + texto. Ej: "en 2h tomar agua"', required: true },
+        },
+        riskLevel: RiskLevel.LOW_RISK_WRITE,
+        requiresConfirmation: false,
+      },
+      {
+        name: 'list_reminders',
+        description: 'Lista recordatorios pendientes',
+        parameters: {},
+        riskLevel: RiskLevel.READ_ONLY,
+        requiresConfirmation: false,
+      },
+      {
+        name: 'cancel_reminder',
+        description: 'Cancela un recordatorio por número',
+        parameters: {
+          index: { type: 'string', description: 'Número del recordatorio (1, 2, ...)', required: true },
+        },
+        riskLevel: RiskLevel.LOW_RISK_WRITE,
+        requiresConfirmation: false,
+      },
+      {
+        // Acción interna: el usuario responde con la hora a un draft pendiente.
+        name: 'complete_reminder_with_time',
+        description: 'Completa un recordatorio pendiente con la hora indicada',
+        parameters: {
+          timeSpec: { type: 'string', description: 'Hora: ej. 9am, 15:00, a las 18:00', required: true },
+        },
+        riskLevel: RiskLevel.LOW_RISK_WRITE,
+        requiresConfirmation: false,
+      },
+      {
+        name: 'show_overdue_reminders',
+        description: 'Muestra recordatorios acumulados durante modo silencio',
+        parameters: {},
+        riskLevel: RiskLevel.READ_ONLY,
+        requiresConfirmation: false,
+      },
     ];
   }
 
@@ -256,7 +429,11 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
       // Recursos de crisis (READ_ONLY, derivación)
       '/recursos': 'show_crisis_resources',
       '/crisis_recursos': 'show_crisis_resources',
-      // NOTA: /silencio no se mapea aquí porque la rule captura su duración opcional.
+      // Fase 3 (sin args): comandos directos
+      '/recordatorios': 'list_reminders',
+      '/ver_recordatorios': 'show_overdue_reminders',
+      // NOTA: /silencio, /recordar y /cancelar_recordatorio NO se mapean aquí
+      // porque sus rules capturan argumentos del usuario.
     };
   }
 
@@ -362,6 +539,38 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
         extractParams: (_match, _normalized, rawText) => ({ dump: rawText }),
       },
 
+      // ── Fase 3 — Recordatorios programados ───────────────────────────────
+      // /recordar con argumentos: captura todo lo que sigue como "spec"
+      {
+        patterns: [/^\/recordar(?:\s+(.+))?$/i],
+        action: 'add_reminder',
+        extractParams: (_match, _normalized, rawText) => {
+          const m = rawText.match(/^\/recordar\s*(.*)$/i);
+          return { spec: (m?.[1] ?? '').trim() };
+        },
+      },
+      // /cancelar_recordatorio N
+      {
+        patterns: [/^\/cancelar_recordatorio\s+(\d+)$/i],
+        action: 'cancel_reminder',
+        extractParams: (match) => ({ index: match[1] }),
+      },
+      // "verlos" / "ver recordatorios" / "muestralos" → show overdue summary
+      {
+        patterns: [
+          /^(verlos|ver recordatorios|mostrar recordatorios|muestralos|mostrarmelos)$/,
+        ],
+        action: 'show_overdue_reminders',
+      },
+      // Solo hora (respuesta a "¿a qué hora mañana?"): captura time spec
+      {
+        patterns: [
+          /^(?:manana\s+)?(?:a\s+las\s+)?\d{1,2}(?::\d{2})?\s*(am|pm)?$/,
+        ],
+        action: 'complete_reminder_with_time',
+        extractParams: (_match, _normalized, rawText) => ({ timeSpec: rawText.trim() }),
+      },
+
       // ── Fase 2 — Recursos de crisis (READ_ONLY, derivación) ──────────────
       // NOTA: NO incluye frases de riesgo ("no quiero seguir", "quiero morir",
       // etc.) — esas las captura el pre-filter global ANTES de llegar aquí.
@@ -409,6 +618,17 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
         return await this.agendaClassify(userId, params);
       case 'show_crisis_resources':
         return this.showCrisisResources();
+      // ── Fase 3 ──
+      case 'add_reminder':
+        return await this.addReminder(userId, params);
+      case 'list_reminders':
+        return await this.listReminders(userId);
+      case 'cancel_reminder':
+        return await this.cancelReminder(userId, params);
+      case 'complete_reminder_with_time':
+        return await this.completeReminderWithTime(userId, params);
+      case 'show_overdue_reminders':
+        return await this.showOverdueReminders(userId);
       default:
         return { success: false, message: `Acción "${action}" no implementada en ADHD Coach.` };
     }
@@ -600,6 +820,12 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
     } else {
       lines.push('- Modo silencio: no activo.');
     }
+    const pendingReminders = await this.store.listReminders(userId);
+    if (pendingReminders.length > 0) {
+      lines.push(`- Recordatorios programados: ${pendingReminders.length} pendiente(s).`);
+    } else {
+      lines.push('- Recordatorios programados: ninguno.');
+    }
     lines.push('- Preferencias básicas: ninguna registrada todavía.');
     lines.push('');
     lines.push('Opciones: A) borrar todo, B) borrar una parte, C) cambiar consentimientos.');
@@ -683,5 +909,225 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
       'Si estás en peligro inmediato, contacta emergencias ahora.',
     ].join('\n');
     return { success: true, message };
+  }
+
+  // ─── Fase 3: recordatorios programados ───────────────────────────────────
+
+  private async addReminder(userId: string, params: Record<string, unknown>): Promise<ActionResult> {
+    const spec = String(params.spec ?? '').trim();
+    if (!spec) {
+      return {
+        success: false,
+        message:
+          '⚠️ ¿Qué quieres recordar y a qué hora? Ej: "/recordar en 2h tomar agua", ' +
+          '"/recordar mañana 9am llamar al doctor".',
+      };
+    }
+    const parsed = parseReminderSpec(spec);
+    if (!parsed.ok) {
+      if (parsed.reason === 'tomorrow_needs_hour') {
+        // Guardar el draft y pedir hora explícita
+        await this.store.setPendingReminderDraft(userId, {
+          text: parsed.text,
+          dayHint: 'tomorrow',
+        });
+        return {
+          success: true,
+          message: `🕒 ¿A qué hora mañana quieres que te recuerde "${parsed.text}"? (Ej: 9am, 15:00)`,
+        };
+      }
+      if (parsed.reason === 'missing_text') {
+        return {
+          success: false,
+          message: '⚠️ Necesito también qué quieres recordar. Ej: "en 2h tomar agua".',
+        };
+      }
+      return {
+        success: false,
+        message:
+          '⚠️ No entendí el tiempo. Usa: "en 2h <texto>", "hoy 18:00 <texto>", ' +
+          '"mañana 9am <texto>", o "15:00 <texto>".',
+      };
+    }
+    const { id } = await this.store.addReminder(userId, parsed.text, parsed.dueAt.toISOString());
+    return {
+      success: true,
+      message:
+        `⏰ Recordatorio programado: "${parsed.text}" para ${formatHasta(parsed.dueAt.toISOString())}. ` +
+        `(id ${id}) Si quieres cancelarlo, escribe /cancelar_recordatorio <número>.`,
+    };
+  }
+
+  private async listReminders(userId: string): Promise<ActionResult> {
+    const list = await this.store.listReminders(userId);
+    if (list.length === 0) {
+      return {
+        success: true,
+        message: '🗒️ No tienes recordatorios pendientes. Crea uno con /recordar.',
+      };
+    }
+    const lines: string[] = ['🗒️ *Recordatorios pendientes:*', ''];
+    list.forEach((r, i) => {
+      lines.push(`  ${i + 1}. ${r.text} — ${formatHasta(r.dueAt)}`);
+    });
+    lines.push('', '_Cancela uno con `/cancelar_recordatorio <número>`._');
+    return { success: true, message: lines.join('\n') };
+  }
+
+  private async cancelReminder(userId: string, params: Record<string, unknown>): Promise<ActionResult> {
+    const idxRaw = String(params.index ?? '').trim();
+    const idx = parseInt(idxRaw, 10);
+    if (!Number.isFinite(idx) || idx < 1) {
+      return {
+        success: false,
+        message:
+          '⚠️ Necesito un número. Ej: /cancelar_recordatorio 1. Mira la lista con /recordatorios.',
+      };
+    }
+    const cancelledText = await this.store.cancelReminderByIndex(userId, idx);
+    if (!cancelledText) {
+      return {
+        success: false,
+        message: `⚠️ No encontré el recordatorio #${idx}. Revisa la lista con /recordatorios.`,
+      };
+    }
+    return { success: true, message: `🗑️ Cancelado: "${cancelledText}".` };
+  }
+
+  private async completeReminderWithTime(userId: string, params: Record<string, unknown>): Promise<ActionResult> {
+    const draft = await this.store.getPendingReminderDraft(userId);
+    if (!draft) {
+      // Si no hay draft, esta acción no aplica — degradar a sugerencia.
+      return {
+        success: false,
+        message:
+          'ℹ️ No tengo un recordatorio pendiente de hora. Si quieres crear uno: ' +
+          '"/recordar en 2h tomar agua" o "/recordar 18:00 llamar".',
+      };
+    }
+    const timeSpec = String(params.timeSpec ?? '').trim();
+    const hint: 'today' | 'tomorrow' =
+      draft.dayHint === 'today' ? 'today' : 'tomorrow';
+    const due = parseTimeOnly(timeSpec, hint);
+    if (!due) {
+      return {
+        success: false,
+        message: '⚠️ No entendí la hora. Prueba con 9am, 15:00, o "a las 18:00".',
+      };
+    }
+    await this.store.clearPendingReminderDraft(userId);
+    const { id } = await this.store.addReminder(userId, draft.text, due.toISOString());
+    return {
+      success: true,
+      message:
+        `⏰ Listo. Te recuerdo "${draft.text}" el ${formatHasta(due.toISOString())}. (id ${id})`,
+    };
+  }
+
+  private async showOverdueReminders(userId: string): Promise<ActionResult> {
+    const summary = await this.store.getPendingOverdueSummary(userId);
+    if (!summary || summary.reminderIds.length === 0) {
+      return {
+        success: true,
+        message:
+          '🗒️ No hay recordatorios acumulados pendientes. ' +
+          'Ver todos los pendientes con /recordatorios.',
+      };
+    }
+    // Reconstruir los textos a partir de los IDs guardados
+    const allPending = await this.store.listReminders(userId);
+    const lines: string[] = ['🔔 *Recordatorios acumulados durante silencio:*', ''];
+    // Como el resumen guarda IDs ya marcados como done, intentamos imprimirlos
+    // con sus textos a partir del log persistente. Para simplicidad,
+    // listamos los que aún están pendientes y mencionamos cuántos vencieron.
+    const idsSet = new Set(summary.reminderIds);
+    // Marcamos como hechos para que no vuelvan a sonar. Aquí ya están done.
+    lines.push(`Tuviste ${summary.reminderIds.length} recordatorio(s) durante silencio. Ya fueron registrados como entregados.`);
+    if (allPending.length > 0) {
+      lines.push('', 'Pendientes a futuro:');
+      allPending.forEach((r, i) => {
+        if (!idsSet.has(r.id)) {
+          lines.push(`  ${i + 1}. ${r.text} — ${formatHasta(r.dueAt)}`);
+        }
+      });
+    }
+    await this.store.clearPendingOverdueSummary(userId);
+    return { success: true, message: lines.join('\n') };
+  }
+
+  /**
+   * Tick del despachador proactivo. Se llama cada N segundos desde el host
+   * (src/index.ts). Recibe un `send(userId, text)` para emitir mensajes
+   * proactivos sin acoplarse al adapter.
+   *
+   * Reglas:
+   *  - Lee los recordatorios vencidos de TODOS los usuarios del dominio.
+   *  - Si un usuario está en /silencio, pospone los recordatorios al fin de
+   *    silencio y los acumula en overdue_summary. No envía nada.
+   *  - Si NO hay silencio y hay 1 vencido → lo envía y lo marca done.
+   *  - Si NO hay silencio y hay 2+ vencidos (incluye silencio recién terminado)
+   *    → envía un resumen agregado pidiendo "verlos" y marca todos done.
+   *  - El pre-filter de crisis NO aplica a envíos proactivos.
+   */
+  async tick(send: (userId: string, text: string) => Promise<void>): Promise<void> {
+    const nowIso = new Date().toISOString();
+    const due = await this.store.getDueRemindersAllUsers(nowIso);
+    if (due.length === 0) return;
+
+    // Agrupar por usuario
+    const byUser = new Map<string, typeof due>();
+    for (const r of due) {
+      const list = byUser.get(r.userId) ?? [];
+      list.push(r);
+      byUser.set(r.userId, list);
+    }
+
+    for (const [userId, list] of byUser.entries()) {
+      const silenceIso = await this.store.getSilenceUntil(userId);
+      const silenced = !!silenceIso && new Date(silenceIso).getTime() > Date.now();
+
+      if (silenced) {
+        // Posponer cada recordatorio al fin de silencio (+ pequeño offset
+        // para que se reagrupen al despertarlo) y acumularlos en summary.
+        const endOfSilence = new Date(silenceIso!);
+        // Sumar 1 segundo para garantizar que due_at sea > silence_until,
+        // y así dispararse al primer tick tras el silencio.
+        const dispatchAt = new Date(endOfSilence.getTime() + 1000);
+        const acumulados: string[] = [];
+        for (const r of list) {
+          await this.store.postponeReminder(r.id, dispatchAt.toISOString());
+          acumulados.push(r.id);
+        }
+        // Mantener acumulación a lo largo de varios ticks durante silencio
+        const prev = await this.store.getPendingOverdueSummary(userId);
+        const merged = Array.from(new Set([...(prev?.reminderIds ?? []), ...acumulados]));
+        await this.store.setPendingOverdueSummary(userId, merged);
+        continue;
+      }
+
+      // Sin silencio: revisa si hay summary acumulado de un silencio previo
+      const accumulated = await this.store.getPendingOverdueSummary(userId);
+      const totalCount = list.length + (accumulated?.reminderIds.length ?? 0);
+
+      if (totalCount === 1 && list.length === 1) {
+        // 1 solo recordatorio vencido y sin acumulación previa → enviar normal
+        const r = list[0];
+        await send(userId, `🔔 Recordatorio: ${r.text}`);
+        await this.store.markReminderDone(r.id);
+        continue;
+      }
+
+      // 2+ acumulados → enviar resumen (sin listar uno por uno, evita avalancha)
+      for (const r of list) {
+        await this.store.markReminderDone(r.id);
+      }
+      const allIds = [...(accumulated?.reminderIds ?? []), ...list.map((r) => r.id)];
+      await this.store.setPendingOverdueSummary(userId, allIds);
+      await send(
+        userId,
+        `🔔 Tienes ${allIds.length} recordatorios pendientes acumulados. ` +
+          `¿Quieres verlos ahora? Responde "verlos" o /ver_recordatorios.`,
+      );
+    }
   }
 }

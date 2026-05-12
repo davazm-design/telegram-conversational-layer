@@ -51,12 +51,25 @@ class MemoryTodoStore implements ITodoStore {
   async clearReminders(userId: string) { this.reminders.delete(this.key(userId)); }
 }
 
+interface MemoryReminder {
+  id: string;
+  userId: string;
+  text: string;
+  dueAt: string;
+  completed: boolean;
+}
+
 class MemoryAdhdCoachStore implements IAdhdCoachStore {
   constructor(private domainId: string) {}
   private checkins = new Map<string, { date: string; completed: boolean }[]>();
   private microTasks = new Map<string, { id: string; text: string; completed: boolean }[]>();
   private focusSessions = new Map<string, { task: string; completed: boolean }[]>();
   private silenceUntil = new Map<string, string>();
+  // Fase 3: reminders
+  private reminders = new Map<string, MemoryReminder[]>();
+  private reminderDraft = new Map<string, { text: string; dayHint: 'tomorrow' | 'today' | 'unspecified' }>();
+  private overdueSummary = new Map<string, { reminderIds: string[] }>();
+  private reminderSeq = 0;
   private key(userId: string) { return `${this.domainId}:${userId}`; }
 
   async getCheckins(userId: string) { return this.checkins.get(this.key(userId)) ?? []; }
@@ -111,6 +124,84 @@ class MemoryAdhdCoachStore implements IAdhdCoachStore {
     this.microTasks.delete(k);
     this.focusSessions.delete(k);
     this.silenceUntil.delete(k);
+    this.reminders.delete(k);
+    this.reminderDraft.delete(k);
+    this.overdueSummary.delete(k);
+  }
+
+  // ── Fase 3: reminders ──────────────────────────────────────────────────
+
+  async addReminder(userId: string, text: string, dueAtIso: string) {
+    const id = String(++this.reminderSeq) + '-' + Math.random().toString(36).slice(2, 6);
+    const list = this.reminders.get(this.key(userId)) ?? [];
+    list.push({ id, userId, text, dueAt: dueAtIso, completed: false });
+    this.reminders.set(this.key(userId), list);
+    return { id };
+  }
+
+  async listReminders(userId: string) {
+    const list = this.reminders.get(this.key(userId)) ?? [];
+    return list
+      .filter((r) => !r.completed)
+      .sort((a, b) => a.dueAt.localeCompare(b.dueAt))
+      .map(({ id, text, dueAt }) => ({ id, text, dueAt }));
+  }
+
+  async cancelReminderByIndex(userId: string, index1Based: number) {
+    const pending = await this.listReminders(userId);
+    if (index1Based < 1 || index1Based > pending.length) return null;
+    const target = pending[index1Based - 1];
+    const list = this.reminders.get(this.key(userId)) ?? [];
+    const r = list.find((x) => x.id === target.id);
+    if (!r) return null;
+    r.completed = true;
+    return r.text;
+  }
+
+  async getDueRemindersAllUsers(nowIso: string) {
+    const out: Array<{ id: string; userId: string; text: string; dueAt: string }> = [];
+    for (const list of this.reminders.values()) {
+      for (const r of list) {
+        if (!r.completed && r.dueAt <= nowIso) {
+          out.push({ id: r.id, userId: r.userId, text: r.text, dueAt: r.dueAt });
+        }
+      }
+    }
+    return out.sort((a, b) => a.dueAt.localeCompare(b.dueAt));
+  }
+
+  async markReminderDone(reminderId: string) {
+    for (const list of this.reminders.values()) {
+      const r = list.find((x) => x.id === reminderId);
+      if (r) { r.completed = true; return; }
+    }
+  }
+
+  async postponeReminder(reminderId: string, newDueAtIso: string) {
+    for (const list of this.reminders.values()) {
+      const r = list.find((x) => x.id === reminderId);
+      if (r) { r.dueAt = newDueAtIso; return; }
+    }
+  }
+
+  async setPendingReminderDraft(userId: string, draft: { text: string; dayHint: 'tomorrow' | 'today' | 'unspecified' }) {
+    this.reminderDraft.set(this.key(userId), { ...draft });
+  }
+  async getPendingReminderDraft(userId: string) {
+    return this.reminderDraft.get(this.key(userId)) ?? null;
+  }
+  async clearPendingReminderDraft(userId: string) {
+    this.reminderDraft.delete(this.key(userId));
+  }
+
+  async setPendingOverdueSummary(userId: string, reminderIds: string[]) {
+    this.overdueSummary.set(this.key(userId), { reminderIds: [...reminderIds] });
+  }
+  async getPendingOverdueSummary(userId: string) {
+    return this.overdueSummary.get(this.key(userId)) ?? null;
+  }
+  async clearPendingOverdueSummary(userId: string) {
+    this.overdueSummary.delete(this.key(userId));
   }
 }
 

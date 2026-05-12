@@ -43,9 +43,40 @@ export interface IAdhdCoachStore {
 
   /**
    * Borra todo el estado del dominio para el usuario: checkins, microtasks,
-   * focus sessions, silence_until. Usado por la acción "borrar todo".
+   * focus sessions, silence_until, recordatorios, drafts. Usado por
+   * la acción "borrar todo".
    */
   resetAllUserState(userId: string): Promise<void>;
+
+  // ── Fase 3: recordatorios programados ──────────────────────────────────
+  /**
+   * Crea un recordatorio pendiente. Devuelve el id interno (estable por
+   * usuario, sirve para postpone/markDone).
+   */
+  addReminder(userId: string, text: string, dueAtIso: string): Promise<{ id: string }>;
+  /** Recordatorios PENDIENTES del usuario, ordenados por due_at ascendente. */
+  listReminders(userId: string): Promise<Array<{ id: string; text: string; dueAt: string }>>;
+  /** Cancela por índice (1-based, sobre listReminders). Devuelve el texto cancelado o null. */
+  cancelReminderByIndex(userId: string, index1Based: number): Promise<string | null>;
+  /** Todos los recordatorios PENDIENTES con dueAt <= nowIso, a través de todos los usuarios del dominio. */
+  getDueRemindersAllUsers(nowIso: string): Promise<Array<{ id: string; userId: string; text: string; dueAt: string }>>;
+  /** Marca un recordatorio como enviado/completado. */
+  markReminderDone(reminderId: string): Promise<void>;
+  /** Reprograma un recordatorio existente a un nuevo due_at. */
+  postponeReminder(reminderId: string, newDueAtIso: string): Promise<void>;
+
+  // ── Drafts (recordatorio esperando que el usuario indique hora) ────────
+  setPendingReminderDraft(
+    userId: string,
+    draft: { text: string; dayHint: 'tomorrow' | 'today' | 'unspecified' },
+  ): Promise<void>;
+  getPendingReminderDraft(userId: string): Promise<{ text: string; dayHint: 'tomorrow' | 'today' | 'unspecified' } | null>;
+  clearPendingReminderDraft(userId: string): Promise<void>;
+
+  // ── Resumen de recordatorios acumulados durante silencio ───────────────
+  setPendingOverdueSummary(userId: string, reminderIds: string[]): Promise<void>;
+  getPendingOverdueSummary(userId: string): Promise<{ reminderIds: string[] } | null>;
+  clearPendingOverdueSummary(userId: string): Promise<void>;
 }
 
 export interface IStorageProvider {
