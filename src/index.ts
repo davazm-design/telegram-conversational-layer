@@ -310,6 +310,16 @@ async function main(): Promise<void> {
   const config = loadConfig();
   setLogLevel(config.logLevel);
 
+  // Last-resort guards: NO debemos morir por una rejection huérfana o un
+  // throw asíncrono en un callback. Si algo así pasa, lo logueamos y
+  // seguimos. Crashes de verdad (memoria, etc.) los maneja el runtime.
+  process.on('unhandledRejection', (reason) => {
+    logger.error(COMPONENT, 'Unhandled promise rejection (container kept alive)', { reason: String(reason) });
+  });
+  process.on('uncaughtException', (err) => {
+    logger.error(COMPONENT, 'Uncaught exception (container kept alive)', { error: String(err), stack: (err as Error)?.stack });
+  });
+
   logger.info(COMPONENT, 'Starting Universal Telegram Conversational Layer...');
 
   if (!config.telegram.botToken) {

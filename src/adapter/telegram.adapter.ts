@@ -99,12 +99,34 @@ export class TelegramAdapter implements IMessageAdapter {
     const webhookPath = `/webhook/${this.config.telegram.webhookSecret}`;
     this.app.use(webhookPath, webhookCallback(this.bot, 'express'));
 
-    this.server = this.app.listen(port, '0.0.0.0', async () => {
+    this.server = this.app.listen(port, '0.0.0.0', () => {
       logger.info(COMPONENT, `Express server listening on port ${port} for webhooks.`);
       const webhookUrl = `${this.config.telegram.publicWebhookUrl.replace(/\/$/, '')}${webhookPath}`;
-      await this.bot.api.setWebhook(webhookUrl);
-      logger.info(COMPONENT, `Webhook successfully set to public URL (path hidden for security)`);
+      // Fire-and-forget con reintentos. NO debe matar el proceso si Telegram
+      // responde lento o hay un blip de red — el server HTTP ya está vivo,
+      // Telegram puede aceptar el webhook segundos más tarde sin drama.
+      void this.registerWebhookWithRetry(webhookUrl);
     });
+  }
+
+  private async registerWebhookWithRetry(webhookUrl: string): Promise<void> {
+    const maxAttempts = 6;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        await this.bot.api.setWebhook(webhookUrl);
+        logger.info(COMPONENT, 'Webhook successfully set to public URL (path hidden for security)');
+        return;
+      } catch (err) {
+        const delayMs = Math.min(60_000, 2_000 * 2 ** (attempt - 1));
+        logger.warn(COMPONENT, `setWebhook attempt ${attempt}/${maxAttempts} failed, retry in ${Math.round(delayMs/1000)}s`, {
+          error: String(err),
+        });
+        if (attempt < maxAttempts) {
+          await new Promise((r) => setTimeout(r, delayMs));
+        }
+      }
+    }
+    logger.error(COMPONENT, 'setWebhook failed after all retries; container stays up but Telegram will not deliver messages until next deploy or manual setWebhook');
   }
 
   async sendResponse(response: GenericResponse): Promise<void> {
