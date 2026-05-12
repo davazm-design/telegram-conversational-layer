@@ -114,11 +114,68 @@ function capFirst(s: string): string {
   return s.length === 0 ? s : s[0].toUpperCase() + s.slice(1);
 }
 
+// ─── Helpers de zona horaria ────────────────────────────────────────────────
+// El parser DEBE interpretar horas en la TZ del usuario (REMINDER_TZ),
+// no en la TZ del runtime. En Railway, runtime=UTC, así que `setHours(11)`
+// guardaba "11am UTC", que al renderizar en MX (UTC-6) salía como 05:00.
+
+function reminderTz(): string {
+  return process.env.REMINDER_TZ || 'America/Mexico_City';
+}
+
+interface WallCalendar { year: number; month0: number; day: number; hour: number; minute: number }
+
+/**
+ * Devuelve los componentes de la fecha (year/month0/day/hour/minute) tal
+ * como se ven en `tz`. Usado para saber qué día es "hoy" para el usuario.
+ */
+function getCalendarPartsInTz(date: Date, tz: string): WallCalendar {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: tz, hour12: false,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit',
+  }).formatToParts(date);
+  const map: Record<string, string> = {};
+  for (const p of parts) if (p.type !== 'literal') map[p.type] = p.value;
+  return {
+    year: parseInt(map.year, 10),
+    month0: parseInt(map.month, 10) - 1,
+    day: parseInt(map.day, 10),
+    hour: parseInt(map.hour === '24' ? '0' : map.hour, 10),
+    minute: parseInt(map.minute, 10),
+  };
+}
+
+/**
+ * Construye un Date que representa la WALL TIME indicada (year/month0/day/
+ * hour/minute) en la zona horaria `tz`. Devuelve el instante UTC correcto.
+ *
+ * Algoritmo robusto frente a DST: toma un candidato como si la wall time
+ * fuera UTC, mide en cuánto se desplaza al expresarla en la TZ destino, y
+ * compensa. Funciona tanto para TZs con DST como sin DST.
+ */
+function makeDateInTz(year: number, month0: number, day: number, hour: number, minute: number, tz: string): Date {
+  const candidate = new Date(Date.UTC(year, month0, day, hour, minute));
+  const wall = getCalendarPartsInTz(candidate, tz);
+  const wallAsUtc = Date.UTC(wall.year, wall.month0, wall.day, wall.hour, wall.minute);
+  const offsetMs = wallAsUtc - candidate.getTime();
+  return new Date(candidate.getTime() - offsetMs);
+}
+
+/** Suma 1 día a una fecha de calendario, manejando wrap de mes/año. */
+function addOneDay(d: WallCalendar): WallCalendar {
+  const t = new Date(Date.UTC(d.year, d.month0, d.day));
+  t.setUTCDate(t.getUTCDate() + 1);
+  return { year: t.getUTCFullYear(), month0: t.getUTCMonth(), day: t.getUTCDate(), hour: 0, minute: 0 };
+}
+
 export function parseReminderSpec(spec: string, now: Date = new Date()): ParseResult {
   const norm = normalizeForParse(spec);
   if (!norm) return { ok: false, reason: 'missing_time' };
+  const tz = reminderTz();
+  const today = getCalendarPartsInTz(now, tz);
 
-  // 1) "en X (min|h|d) <texto>"
+  // 1) "en X (min|h|d) <texto>" — relativo, TZ-independent
   let m = norm.match(/^en\s+(\d+)\s*(min(?:utos?)?|h|hora|horas|d|dia|dias)\b\s*(.*)$/);
   if (m) {
     const n = parseInt(m[1], 10);
@@ -132,7 +189,7 @@ export function parseReminderSpec(spec: string, now: Date = new Date()): ParseRe
     return { ok: true, dueAt: new Date(now.getTime() + ms), text: capFirst(text) };
   }
 
-  // 2) "hoy [a las] HH[:MM] [am|pm] <texto>"
+  // 2) "hoy [a las] HH[:MM] [am|pm] <texto>" — wall time HOY en TZ del usuario
   m = norm.match(/^hoy\s+(?:a\s+las\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s+(.+)$/);
   if (m) {
     const h = hourTo24(parseInt(m[1], 10), m[3]);
@@ -141,12 +198,11 @@ export function parseReminderSpec(spec: string, now: Date = new Date()): ParseRe
     if (mins < 0 || mins > 59) return { ok: false, reason: 'missing_time' };
     const text = m[4].trim();
     if (!text) return { ok: false, reason: 'missing_text' };
-    const due = new Date(now);
-    due.setHours(h, mins, 0, 0);
+    const due = makeDateInTz(today.year, today.month0, today.day, h, mins, tz);
     return { ok: true, dueAt: due, text: capFirst(text) };
   }
 
-  // 3) "manana [a las] HH[:MM] [am|pm] <texto>"
+  // 3) "manana [a las] HH[:MM] [am|pm] <texto>" — wall time MAÑANA en TZ
   m = norm.match(/^manana\s+(?:a\s+las\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s+(.+)$/);
   if (m) {
     const h = hourTo24(parseInt(m[1], 10), m[3]);
@@ -155,9 +211,8 @@ export function parseReminderSpec(spec: string, now: Date = new Date()): ParseRe
     if (mins < 0 || mins > 59) return { ok: false, reason: 'missing_time' };
     const text = m[4].trim();
     if (!text) return { ok: false, reason: 'missing_text' };
-    const due = new Date(now);
-    due.setDate(due.getDate() + 1);
-    due.setHours(h, mins, 0, 0);
+    const tomorrow = addOneDay(today);
+    const due = makeDateInTz(tomorrow.year, tomorrow.month0, tomorrow.day, h, mins, tz);
     return { ok: true, dueAt: due, text: capFirst(text) };
   }
 
@@ -169,7 +224,8 @@ export function parseReminderSpec(spec: string, now: Date = new Date()): ParseRe
     return { ok: false, reason: 'tomorrow_needs_hour', text: capFirst(text) };
   }
 
-  // 5) "[a las] HH:MM <texto>" o "HHam/pm <texto>" → hoy si futuro, mañana si pasó
+  // 5) "[a las] HH:MM <texto>" o "HHam/pm <texto>"
+  //    → hoy si futuro (en TZ del usuario), mañana si ya pasó.
   m = norm.match(/^(?:a\s+las\s+)?(\d{1,2})(?::(\d{2})|\s*(am|pm))\s+(.+)$/);
   if (m) {
     const h = hourTo24(parseInt(m[1], 10), m[3]);
@@ -178,9 +234,11 @@ export function parseReminderSpec(spec: string, now: Date = new Date()): ParseRe
     if (mins < 0 || mins > 59) return { ok: false, reason: 'missing_time' };
     const text = m[4].trim();
     if (!text) return { ok: false, reason: 'missing_text' };
-    const due = new Date(now);
-    due.setHours(h, mins, 0, 0);
-    if (due.getTime() <= now.getTime()) due.setDate(due.getDate() + 1);
+    let due = makeDateInTz(today.year, today.month0, today.day, h, mins, tz);
+    if (due.getTime() <= now.getTime()) {
+      const tomorrow = addOneDay(today);
+      due = makeDateInTz(tomorrow.year, tomorrow.month0, tomorrow.day, h, mins, tz);
+    }
     return { ok: true, dueAt: due, text: capFirst(text) };
   }
 
@@ -196,14 +254,14 @@ export function parseTimeOnly(input: string, dayHint: 'today' | 'tomorrow', now:
   if (h === null) return null;
   const mins = m[2] ? parseInt(m[2], 10) : 0;
   if (mins < 0 || mins > 59) return null;
-  const due = new Date(now);
-  if (dayHint === 'tomorrow' || norm.startsWith('manana')) {
-    due.setDate(due.getDate() + 1);
-  }
-  due.setHours(h, mins, 0, 0);
+  const tz = reminderTz();
+  const today = getCalendarPartsInTz(now, tz);
+  const target = (dayHint === 'tomorrow' || norm.startsWith('manana')) ? addOneDay(today) : today;
+  let due = makeDateInTz(target.year, target.month0, target.day, h, mins, tz);
   if (dayHint === 'today' && due.getTime() <= now.getTime()) {
     // si era hoy pero ya pasó, pasa a mañana automáticamente
-    due.setDate(due.getDate() + 1);
+    const tomorrow = addOneDay(today);
+    due = makeDateInTz(tomorrow.year, tomorrow.month0, tomorrow.day, h, mins, tz);
   }
   return due;
 }
@@ -990,7 +1048,7 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
     return {
       success: true,
       message:
-        `⏰ Recordatorio programado: "${parsed.text}" para ${formatHasta(parsed.dueAt.toISOString())}. ` +
+        `⏰ Recordatorio programado: "${parsed.text}" para ${formatLocalDateTime(parsed.dueAt.toISOString())}. ` +
         `(id ${id}) Si quieres cancelarlo, escribe /cancelar_recordatorio <número>.`,
     };
   }
@@ -1071,7 +1129,7 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
     return {
       success: true,
       message:
-        `⏰ Listo. Te recuerdo "${draft.text}" el ${formatHasta(due.toISOString())}. (id ${id})`,
+        `⏰ Listo. Te recuerdo "${draft.text}" el ${formatLocalDateTime(due.toISOString())}. (id ${id})`,
     };
   }
 

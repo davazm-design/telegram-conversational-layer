@@ -70,10 +70,44 @@ function testConfig(): AppConfig {
 
 // ─── Suite 1: Parser ─────────────────────────────────────────────────────────
 
-describe('parseReminderSpec — tiempos absolutos/relativos', () => {
-  const now = new Date('2026-05-12T10:00:00.000Z');
+/**
+ * Extrae los componentes de un Date interpretados en una TZ específica.
+ * Hace los tests deterministas sin depender de la TZ del runtime.
+ */
+function wallInTz(date: Date, tz: string): { year: number; month: number; day: number; hour: number; minute: number } {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: tz, hour12: false,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit',
+  }).formatToParts(date);
+  const map: Record<string, string> = {};
+  for (const p of parts) if (p.type !== 'literal') map[p.type] = p.value;
+  return {
+    year: parseInt(map.year, 10),
+    month: parseInt(map.month, 10),
+    day: parseInt(map.day, 10),
+    hour: parseInt(map.hour === '24' ? '0' : map.hour, 10),
+    minute: parseInt(map.minute, 10),
+  };
+}
 
-  test('"en 2h tomar agua" → +2h, texto "Tomar agua"', () => {
+describe('parseReminderSpec — tiempos absolutos/relativos (TZ-aware MX)', () => {
+  const MX = 'America/Mexico_City';
+  // now = 2026-05-12T16:00:00.000Z = 10:00 MX (Mayo, MX en UTC-6, sin DST).
+  // Elegido para que: 8am MX ya pasó, 11am/15:00/18:00 MX siguen siendo futuros.
+  const now = new Date('2026-05-12T16:00:00.000Z');
+  let prevTz: string | undefined;
+
+  beforeAll(() => {
+    prevTz = process.env.REMINDER_TZ;
+    process.env.REMINDER_TZ = MX;
+  });
+  afterAll(() => {
+    if (prevTz === undefined) delete process.env.REMINDER_TZ;
+    else process.env.REMINDER_TZ = prevTz;
+  });
+
+  test('"en 2h tomar agua" → +2h, texto "Tomar agua" (relativo, TZ-independent)', () => {
     const r = parseReminderSpec('en 2h tomar agua', now);
     expect(r.ok).toBe(true);
     if (r.ok) {
@@ -91,14 +125,14 @@ describe('parseReminderSpec — tiempos absolutos/relativos', () => {
     }
   });
 
-  test('"mañana 9am llamar al doctor" → +1d 9:00, texto correcto', () => {
+  test('"mañana 9am llamar al doctor" → 9am MX mañana (ISO 15:00 UTC)', () => {
     const r = parseReminderSpec('mañana 9am llamar al doctor', now);
     expect(r.ok).toBe(true);
     if (r.ok) {
-      const due = r.dueAt;
-      expect(due.getDate()).toBe(now.getDate() + 1);
-      expect(due.getHours()).toBe(9);
-      expect(due.getMinutes()).toBe(0);
+      const w = wallInTz(r.dueAt, MX);
+      expect(w).toEqual({ year: 2026, month: 5, day: 13, hour: 9, minute: 0 });
+      // En MX (UTC-6, sin DST en mayo): 9am MX = 15:00 UTC.
+      expect(r.dueAt.toISOString()).toBe('2026-05-13T15:00:00.000Z');
       expect(r.text).toBe('Llamar al doctor');
     }
   });
@@ -106,43 +140,41 @@ describe('parseReminderSpec — tiempos absolutos/relativos', () => {
   test('"mañana tomar pastilla" SIN hora → tomorrow_needs_hour', () => {
     const r = parseReminderSpec('mañana tomar pastilla', now);
     expect(r.ok).toBe(false);
-    if (!r.ok) {
-      expect(r.reason).toBe('tomorrow_needs_hour');
-      // sigue conservando el texto para guardarlo como draft
-      if (r.reason === 'tomorrow_needs_hour') {
-        expect(r.text).toBe('Tomar pastilla');
-      }
+    if (!r.ok && r.reason === 'tomorrow_needs_hour') {
+      expect(r.text).toBe('Tomar pastilla');
     }
   });
 
-  test('"hoy 18:00 salir" hoy a las 18:00', () => {
+  test('"hoy 18:00 salir" → 18:00 MX hoy (ISO 00:00 UTC siguiente día)', () => {
     const r = parseReminderSpec('hoy 18:00 salir', now);
     expect(r.ok).toBe(true);
     if (r.ok) {
-      expect(r.dueAt.getHours()).toBe(18);
-      expect(r.dueAt.getMinutes()).toBe(0);
+      const w = wallInTz(r.dueAt, MX);
+      expect(w).toEqual({ year: 2026, month: 5, day: 12, hour: 18, minute: 0 });
+      // 18:00 MX = 24:00 UTC = 00:00 UTC del día siguiente.
+      expect(r.dueAt.toISOString()).toBe('2026-05-13T00:00:00.000Z');
       expect(r.text).toBe('Salir');
     }
   });
 
-  test('"15:00 reunión" → hoy si futuro', () => {
+  test('"15:00 reunión" → 15:00 MX hoy (porque 10:00 MX < 15:00 MX, futuro)', () => {
     const r = parseReminderSpec('15:00 reunion', now);
     expect(r.ok).toBe(true);
     if (r.ok) {
-      expect(r.dueAt.getHours()).toBe(15);
-      expect(r.dueAt.getMinutes()).toBe(0);
-      // si now es 10:00 y due 15:00 → mismo día
-      expect(r.dueAt.getDate()).toBe(now.getDate());
+      const w = wallInTz(r.dueAt, MX);
+      expect(w).toEqual({ year: 2026, month: 5, day: 12, hour: 15, minute: 0 });
+      expect(r.dueAt.toISOString()).toBe('2026-05-12T21:00:00.000Z');
     }
   });
 
-  test('"8am leer" cuando ya pasó → mañana 8am', () => {
-    // now = 10:00, 8am ya pasó hoy
+  test('"8am leer" cuando ya pasó (en MX) → mañana 8am MX', () => {
+    // now = 10:00 MX. 8am MX ya pasó hoy → tomorrow.
     const r = parseReminderSpec('8am leer', now);
     expect(r.ok).toBe(true);
     if (r.ok) {
-      expect(r.dueAt.getHours()).toBe(8);
-      expect(r.dueAt.getDate()).toBe(now.getDate() + 1);
+      const w = wallInTz(r.dueAt, MX);
+      expect(w).toEqual({ year: 2026, month: 5, day: 13, hour: 8, minute: 0 });
+      expect(r.dueAt.toISOString()).toBe('2026-05-13T14:00:00.000Z');
     }
   });
 
@@ -151,24 +183,40 @@ describe('parseReminderSpec — tiempos absolutos/relativos', () => {
     expect(r.ok).toBe(false);
   });
 
-  test('parseTimeOnly("9am", tomorrow) → mañana 9:00', () => {
+  test('parseTimeOnly("9am", tomorrow) → 9am MX mañana', () => {
     const r = parseTimeOnly('9am', 'tomorrow', now);
     expect(r).not.toBeNull();
-    expect(r!.getHours()).toBe(9);
-    expect(r!.getDate()).toBe(now.getDate() + 1);
+    const w = wallInTz(r!, MX);
+    expect(w).toEqual({ year: 2026, month: 5, day: 13, hour: 9, minute: 0 });
+    expect(r!.toISOString()).toBe('2026-05-13T15:00:00.000Z');
   });
 
-  test('parseTimeOnly("a las 15:30", today) → hoy 15:30', () => {
+  test('parseTimeOnly("a las 15:30", today) → 15:30 MX hoy', () => {
     const r = parseTimeOnly('a las 15:30', 'today', now);
     expect(r).not.toBeNull();
-    expect(r!.getHours()).toBe(15);
-    expect(r!.getMinutes()).toBe(30);
-    expect(r!.getDate()).toBe(now.getDate());
+    const w = wallInTz(r!, MX);
+    expect(w).toEqual({ year: 2026, month: 5, day: 12, hour: 15, minute: 30 });
+    expect(r!.toISOString()).toBe('2026-05-12T21:30:00.000Z');
   });
 
   test('parseTimeOnly("xyz") → null', () => {
     const r = parseTimeOnly('xyz', 'today', now);
     expect(r).toBeNull();
+  });
+
+  // ── Regresión bug producción (screenshot del usuario) ───────────────────
+  test('regresión TZ prod: "mañana 11am ir con Manuel" → 11am MX, NO 11am UTC', () => {
+    const r = parseReminderSpec('mañana 11am ir con Manuel', now);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      const w = wallInTz(r.dueAt, MX);
+      expect(w.hour).toBe(11);
+      expect(w.minute).toBe(0);
+      // 11am MX = 17:00 UTC. ANTES del fix: el bot guardaba 11:00 UTC y
+      // mostraba 05:00 MX (lo del screenshot). Después del fix: 17:00 UTC,
+      // se ve como 11:00 MX en /recordatorios.
+      expect(r.dueAt.toISOString()).toBe('2026-05-13T17:00:00.000Z');
+    }
   });
 });
 
