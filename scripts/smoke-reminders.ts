@@ -169,6 +169,27 @@ async function main() {
   await adapter.send('asdfqwerzxcv');
   log('USER: asdfqwerzxcv (fallback orientador)', adapter.last());
 
+  // ── Refactor /agenda (Fase 3): flujo conversacional 4 pasos ─────────────
+  adapter.reset();
+  await adapter.send('/agenda');
+  log('USER: /agenda (paso 1: invita)', adapter.last());
+
+  adapter.reset();
+  await adapter.send('terminar proyecto LABDEN, limpiar el jardín, hacer mi devocional, pagar tarjeta');
+  log('USER: <volcado> (paso 2: clasifica + pide selección)', adapter.last());
+
+  adapter.reset();
+  await adapter.send('Sí, hacer devocional, terminar LABDEN y limpiar jardín');
+  log('USER: "Sí, hacer devocional..." (paso 3: guarda como microtasks)', adapter.last());
+
+  adapter.reset();
+  await adapter.send('qué tengo hoy');
+  log('USER: "qué tengo hoy" (paso 4: consulta)', adapter.last());
+
+  adapter.reset();
+  await adapter.send('ya los cargaste a mi agenda');
+  log('USER: "ya los cargaste a mi agenda?" → list_today_focus', adapter.last());
+
   // 12) Silencio + tick con vencido → no debe enviar
   adapter.reset();
   await adapter.send('/silencio 2h');

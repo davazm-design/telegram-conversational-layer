@@ -69,6 +69,8 @@ class MemoryAdhdCoachStore implements IAdhdCoachStore {
   private reminders = new Map<string, MemoryReminder[]>();
   private reminderDraft = new Map<string, { text: string; dayHint: string }>();
   private overdueSummary = new Map<string, { reminderIds: string[] }>();
+  // Refactor /agenda: candidatos clasificados pendientes de selección.
+  private agendaSelection = new Map<string, Array<{ text: string; category: string }>>();
   private reminderSeq = 0;
   private key(userId: string) { return `${this.domainId}:${userId}`; }
 
@@ -127,6 +129,7 @@ class MemoryAdhdCoachStore implements IAdhdCoachStore {
     this.reminders.delete(k);
     this.reminderDraft.delete(k);
     this.overdueSummary.delete(k);
+    this.agendaSelection.delete(k);
   }
 
   // ── Fase 3: reminders ──────────────────────────────────────────────────
@@ -202,6 +205,17 @@ class MemoryAdhdCoachStore implements IAdhdCoachStore {
   }
   async clearPendingOverdueSummary(userId: string) {
     this.overdueSummary.delete(this.key(userId));
+  }
+
+  async setPendingAgendaSelection(userId: string, items: Array<{ text: string; category: string }>) {
+    this.agendaSelection.set(this.key(userId), items.map((i) => ({ ...i })));
+  }
+  async getPendingAgendaSelection(userId: string) {
+    const list = this.agendaSelection.get(this.key(userId));
+    return list ? list.map((i) => ({ ...i })) : null;
+  }
+  async clearPendingAgendaSelection(userId: string) {
+    this.agendaSelection.delete(this.key(userId));
   }
 }
 

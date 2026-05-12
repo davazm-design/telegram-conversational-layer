@@ -173,6 +173,16 @@ export class Orchestrator {
 
           // Execute the action
           const result = await this.registry.executeAction(pendingInput.action, params, msg.userId);
+          // Encadenamiento de pasos: si esta acción a su vez devuelve otro
+          // pending_input, lo seteamos para el próximo turno (ej: /agenda
+          // dump → classify → selection).
+          if (result.pendingInput) {
+            await this.sessions.setContext(msg.userId, 'pending_input', result.pendingInput);
+            logger.info(COMPONENT, 'pending_input chained by domain action result', {
+              userId: msg.userId,
+              action: result.pendingInput.action,
+            });
+          }
           return this.respond(msg.chatId, this.formatter.formatResult(result));
         }
       }
@@ -279,6 +289,16 @@ export class Orchestrator {
 
       // ── Step 6: Execute ────────────────────────────────────────────────
       const result = await this.registry.executeAction(intent.action, intent.params, msg.userId);
+      // Si el dominio devolvió un pending_input (flujos multi-paso tipo
+      // /agenda), lo seteamos antes de responder. Slash commands escapan
+      // pending_input (fix global), así el usuario puede salirse.
+      if (result.pendingInput) {
+        await this.sessions.setContext(msg.userId, 'pending_input', result.pendingInput);
+        logger.info(COMPONENT, 'pending_input set by domain action result', {
+          userId: msg.userId,
+          action: result.pendingInput.action,
+        });
+      }
       return this.respond(msg.chatId, this.formatter.formatResult(result));
 
     } catch (err) {

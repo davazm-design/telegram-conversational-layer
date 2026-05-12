@@ -548,6 +548,114 @@ function splitTaskDump(text: string): string[] {
     .filter((p) => p.length > 0);
 }
 
+// ─── Parser de SELECCIÓN de agenda (paso 3 del flujo /agenda) ───────────────
+// Acepta: índices "1,3,5" / "1 y 3"; "todos|todo|todas"; "ninguno|ninguna|nada";
+// texto libre por substring (sin acentos); prefijo afirmativo "sí," / "ok,".
+// Ver docs/agenda-contract.md.
+
+export type AgendaSelectionParseResult =
+  | { kind: 'indices'; indices: number[] }
+  | { kind: 'cancel' }
+  | { kind: 'unparsed' };
+
+const AFFIRMATIVE_PREFIX = /^(si|sí|ok|dale|claro|listo|perfecto)\s*[,:]\s*/i;
+
+export function parseAgendaSelection(
+  input: string,
+  candidates: Array<{ text: string }>,
+): AgendaSelectionParseResult {
+  if (!input || !candidates || candidates.length === 0) return { kind: 'unparsed' };
+
+  // 1) Strip afirmativo: "Sí, X y Z" → "X y Z".
+  let raw = input.trim();
+  const m = raw.match(AFFIRMATIVE_PREFIX);
+  if (m) raw = raw.slice(m[0].length).trim();
+  if (!raw) {
+    // Solo dijo "sí" sin elegir nada explícito. Tratar como ambiguo.
+    return { kind: 'unparsed' };
+  }
+
+  const norm = stripAccentsLower(raw);
+
+  // 2) Cancel ("ninguno", "nada"). Permite frases más largas.
+  if (/^(ninguno|ninguna|ningunos|ningunas|nada|cancelar|cancela)\b/.test(norm)) {
+    return { kind: 'cancel' };
+  }
+
+  // 3) "Todos" / "todo" / "todas".
+  if (/^(todos|todo|todas|todas las anteriores|todos los anteriores)\b/.test(norm)) {
+    return { kind: 'indices', indices: candidates.map((_, i) => i) };
+  }
+
+  // 4) Índices numéricos. Split por ",", " y ", o espacios.
+  const numCandidates = norm
+    .split(/,|\s+y\s+|\s+/)
+    .map((p) => p.trim())
+    .filter((p) => /^\d{1,3}$/.test(p));
+  const validIdx = numCandidates
+    .map((p) => parseInt(p, 10))
+    .filter((n) => n >= 1 && n <= candidates.length);
+  // Si TODOS los tokens del input parecen números (no hubo palabras), tratar
+  // como selección de índices. Esto evita confundir "comer pan, ir 1" con
+  // selección numérica.
+  if (validIdx.length > 0 && validIdx.length === numCandidates.length) {
+    const unique = Array.from(new Set(validIdx));
+    return { kind: 'indices', indices: unique.map((n) => n - 1) };
+  }
+
+  // 5) Texto libre. Split por "," o " y ", trim, descartar prefijos de
+  // categoría ("mantenimiento: limpiar jardín" → "limpiar jardín"). Match
+  // por overlap de palabras significativas (>= 3 chars) — más robusto que
+  // substring puro: "hacer devocional" matchea "hacer mi devocional", y
+  // "terminar LABDEN" matchea "terminar proyecto LABDEN".
+  const parts = raw
+    .split(/,|\s+y\s+/i)
+    .map((p) => p.replace(/^\s*(laboral|personal|mantenimiento|espiritual|otros)\s*:\s*/i, '').trim())
+    .filter((p) => p.length >= 3);
+
+  const indices: number[] = [];
+  for (const part of parts) {
+    const matchIdx = candidates.findIndex((c, idx) => {
+      if (indices.includes(idx)) return false;
+      return softTextMatch(part, c.text);
+    });
+    if (matchIdx >= 0) indices.push(matchIdx);
+  }
+
+  if (indices.length === 0) return { kind: 'unparsed' };
+  return { kind: 'indices', indices };
+}
+
+/** Tokeniza para match: lowercase + sin acentos + palabras >= 3 chars. */
+function tokenizeForMatch(s: string): string[] {
+  return stripAccentsLower(s)
+    .replace(/[^a-z0-9ñ ]+/g, ' ')
+    .split(/\s+/)
+    .filter((t) => t.length >= 3);
+}
+
+/**
+ * Match suave entre dos cadenas. Verdadero si:
+ *  - comparten >= 2 palabras significativas (>= 3 chars), o
+ *  - comparten >= 1 palabra significativa de longitud >= 5 (distintiva).
+ * Esto permite que el usuario teclee solo lo distintivo ("LABDEN",
+ * "devocional") y aún así matchee el candidato completo.
+ */
+function softTextMatch(a: string, b: string): boolean {
+  const ta = new Set(tokenizeForMatch(a));
+  const tb = new Set(tokenizeForMatch(b));
+  if (ta.size === 0 || tb.size === 0) return false;
+  let overlap = 0;
+  let hasDistinctive = false;
+  for (const t of ta) {
+    if (tb.has(t)) {
+      overlap++;
+      if (t.length >= 5) hasDistinctive = true;
+    }
+  }
+  return overlap >= 2 || (overlap >= 1 && hasDistinctive);
+}
+
 // ─── Parseo de duración para /silencio ───────────────────────────────────────
 
 function parseSilenceDuration(arg: string, now: Date = new Date()): Date {
@@ -732,6 +840,18 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
         requiresConfirmation: false,
       },
       {
+        // Refactor Fase 3: paso 3 del flujo /agenda. El usuario responde con
+        // su selección (números, "todos", textos) y guardamos los elegidos
+        // como microtasks. Ver docs/agenda-contract.md.
+        name: 'agenda_confirm_selection',
+        description: 'Confirma cuáles tareas del volcado se guardan en la agenda',
+        parameters: {
+          selection: { type: 'string', description: 'Selección', required: true },
+        },
+        riskLevel: RiskLevel.LOW_RISK_WRITE,
+        requiresConfirmation: false,
+      },
+      {
         // Solo derivación. NO sustituye al crisis pre-filter global —
         // el pre-filter sigue respondiendo PRIMERO a frases de riesgo.
         name: 'show_crisis_resources',
@@ -817,7 +937,7 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
       '/privacidad': 'show_privacy',
       '/abandonar': 'anti_abandono',
       '/reinicio': 'restart_no_guilt',
-      '/agenda': 'agenda_start',
+      // /agenda se maneja via reglas (admite args opcionales: /agenda <volcado>).
       // Recursos de crisis (READ_ONLY, derivación)
       '/recursos': 'show_crisis_resources',
       '/crisis_recursos': 'show_crisis_resources',
@@ -915,7 +1035,22 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
         action: 'restart_no_guilt',
       },
 
-      // ── Fase 2 — Agenda en lenguaje natural ─────────────────────────────
+      // ── Fase 2 — Agenda (refactor Fase 3): flujo conversacional ─────────
+      // /agenda solo → invitar a volcar
+      {
+        patterns: [/^\/agenda$/i],
+        action: 'agenda_start',
+      },
+      // /agenda <texto> → clasificar directo (atajo)
+      {
+        patterns: [/^\/agenda\s+(.+)$/i],
+        action: 'agenda_classify',
+        extractParams: (_match, _normalized, rawText) => {
+          const m = rawText.match(/^\/agenda\s+(.+)$/i);
+          return { dump: (m?.[1] ?? '').trim() };
+        },
+      },
+      // NL para iniciar el flujo
       {
         patterns: [
           /^(organiza mi dia|ordena mi dia|ayudame con el dia)$/,
@@ -924,13 +1059,21 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
         ],
         action: 'agenda_start',
       },
+      // 3+ items separados por comas o " y " → clasificar directo
+      // (atajo sin /agenda; entra al mismo flujo)
       {
-        // 3+ items separados por comas o " y " → clasificar
         patterns: [
           /^[^,]+,\s*[^,]+,[^,]+/,
         ],
         action: 'agenda_classify',
         extractParams: (_match, _normalized, rawText) => ({ dump: rawText }),
+      },
+      // Consulta: "qué tengo hoy", "mi agenda", "ya los cargaste"
+      {
+        patterns: [
+          /^(que tengo hoy|mi agenda|ya los cargaste(?:\s+a mi agenda)?|como va mi dia)\??$/,
+        ],
+        action: 'list_today_focus',
       },
 
       // ── Fase 3 — Recordatorios programados ───────────────────────────────
@@ -1060,6 +1203,8 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
         return this.agendaStart();
       case 'agenda_classify':
         return await this.agendaClassify(userId, params);
+      case 'agenda_confirm_selection':
+        return await this.agendaConfirmSelection(userId, params);
       case 'show_crisis_resources':
         return this.showCrisisResources();
       // ── Fase 3 ──
@@ -1312,11 +1457,21 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
     };
   }
 
+  // ─── /agenda (refactor Fase 3): flujo conversacional 4 pasos ────────────
+  // Ver docs/agenda-contract.md para el diseño completo.
+
   private agendaStart(): ActionResult {
     return {
       success: true,
       message:
-        'Vamos a ordenar el día. Vuélcame lo que tienes en bruto; yo lo separo en laboral, personal, mantenimiento, espiritual y otros.',
+        'Vamos a ordenar el día. Vuélcame lo que tienes en bruto; yo lo separo ' +
+        'en laboral, personal, mantenimiento, espiritual y otros.',
+      // Paso 1 → 2: el SIGUIENTE mensaje del usuario se trata como volcado.
+      pendingInput: {
+        action: 'agenda_classify',
+        paramName: 'dump',
+        prompt: 'Vuélcame tu lista en bruto.',
+      },
     };
   }
 
@@ -1330,21 +1485,117 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
       return { success: false, message: '⚠️ No pude leer ninguna tarea. Sepáralas por comas o "y".' };
     }
 
-    const buckets: Record<Category, string[]> = {
-      laboral: [], personal: [], mantenimiento: [], espiritual: [], otros: [],
-    };
-    for (const it of items) buckets[classifyItem(it)].push(it);
+    // Clasifica y arma lista numerada plana para la selección posterior.
+    const classified: Array<{ text: string; category: Category }> = items.map((it) => ({
+      text: it,
+      category: classifyItem(it),
+    }));
 
+    // Persiste candidatos para el paso 3 (selección).
+    await this.store.setPendingAgendaSelection(
+      userId,
+      classified.map((c) => ({ text: c.text, category: c.category })),
+    );
+
+    // Render: lista numerada con su categoría. Markdown-safe (texto del usuario
+    // escapado para que un "_" no rompa el render de Telegram).
     const lines: string[] = ['Lo separé así:'];
-    if (buckets.laboral.length)       lines.push(`- Laboral: ${buckets.laboral.join(', ')}.`);
-    if (buckets.personal.length)      lines.push(`- Personal: ${buckets.personal.join(', ')}.`);
-    if (buckets.mantenimiento.length) lines.push(`- Mantenimiento: ${buckets.mantenimiento.join(', ')}.`);
-    if (buckets.espiritual.length)    lines.push(`- Espiritual: ${buckets.espiritual.join(', ')}.`);
-    if (buckets.otros.length)         lines.push(`- Otros: ${buckets.otros.join(', ')}.`);
+    classified.forEach((c, i) => {
+      const safe = escapeMdV1(c.text);
+      lines.push(`${i + 1}. ${safe} — ${c.category}`);
+    });
     lines.push('');
-    lines.push('¿Eliges 3 importantes y 1 de mantenimiento para hoy?');
+    lines.push(
+      '¿Cuáles eliges para hoy? Responde con números (ej: 1, 3, 5), con "todos", ' +
+      'o repitiendo los textos. Si nada de esto, escribe "ninguno".',
+    );
 
-    return { success: true, message: lines.join('\n') };
+    return {
+      success: true,
+      message: lines.join('\n'),
+      // Paso 2 → 3: el SIGUIENTE mensaje del usuario es la selección.
+      pendingInput: {
+        action: 'agenda_confirm_selection',
+        paramName: 'selection',
+        prompt: '¿Cuáles eliges?',
+      },
+    };
+  }
+
+  private async agendaConfirmSelection(
+    userId: string,
+    params: Record<string, unknown>,
+  ): Promise<ActionResult> {
+    const selection = String(params.selection ?? '').trim();
+    const candidates = await this.store.getPendingAgendaSelection(userId);
+    if (!candidates || candidates.length === 0) {
+      // No hay selección pendiente (ej: el usuario abandonó el flujo y vuelve
+      // a teclear algo que cayó aquí). Mensaje claro, no fallback.
+      return {
+        success: false,
+        message:
+          'ℹ️ No tengo una selección de agenda pendiente. Empieza con /agenda ' +
+          'para volcar tu día.',
+      };
+    }
+
+    const parsed = parseAgendaSelection(selection, candidates);
+
+    if (parsed.kind === 'cancel') {
+      await this.store.clearPendingAgendaSelection(userId);
+      return {
+        success: true,
+        message:
+          'Listo, no guardé nada. Cuando quieras retomar, vuelve con /agenda.',
+      };
+    }
+
+    if (parsed.kind === 'unparsed') {
+      // Preserva el pending_input para que el usuario reintente.
+      return {
+        success: false,
+        message:
+          '⚠️ No entendí tu selección. Responde con números (ej: 1, 3, 5), con ' +
+          '"todos", o repitiendo los textos.',
+        pendingInput: {
+          action: 'agenda_confirm_selection',
+          paramName: 'selection',
+          prompt: '¿Cuáles eliges?',
+        },
+      };
+    }
+
+    // parsed.kind === 'indices'
+    const indices = parsed.indices;
+    if (indices.length === 0) {
+      // Edge case: parseó pero ningún match. Re-prompt.
+      return {
+        success: false,
+        message:
+          '⚠️ No encontré ninguna tarea que coincida con eso. Prueba con números ' +
+          '(ej: 1, 3) o repite los textos exactamente.',
+        pendingInput: {
+          action: 'agenda_confirm_selection',
+          paramName: 'selection',
+          prompt: '¿Cuáles eliges?',
+        },
+      };
+    }
+
+    // Guardar como microtasks. Mismo modelo existente; sin schema change.
+    const chosen = indices.map((i) => candidates[i].text);
+    for (const text of chosen) {
+      await this.store.addMicroTask(userId, text);
+    }
+    await this.store.clearPendingAgendaSelection(userId);
+
+    const safeList = chosen.map(escapeMdV1).join(', ');
+    return {
+      success: true,
+      message:
+        `✅ Cargué a tu día: ${safeList}. ` +
+        'Ver con /focus o pregunta "qué tengo hoy".',
+    };
   }
 
   private showCrisisResources(): ActionResult {

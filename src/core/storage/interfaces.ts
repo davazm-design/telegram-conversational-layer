@@ -83,6 +83,21 @@ export interface IAdhdCoachStore {
   setPendingOverdueSummary(userId: string, reminderIds: string[]): Promise<void>;
   getPendingOverdueSummary(userId: string): Promise<{ reminderIds: string[] } | null>;
   clearPendingOverdueSummary(userId: string): Promise<void>;
+
+  // ── Selección de agenda pendiente (refactor /agenda) ───────────────────
+  /**
+   * Guarda la lista de candidatos clasificados que el usuario seleccionará
+   * en el siguiente turno. Persiste en `adhd_items` con
+   * `type='agenda_selection'` y JSON serializado en `text` — sin migración.
+   */
+  setPendingAgendaSelection(
+    userId: string,
+    items: Array<{ text: string; category: string }>,
+  ): Promise<void>;
+  getPendingAgendaSelection(
+    userId: string,
+  ): Promise<Array<{ text: string; category: string }> | null>;
+  clearPendingAgendaSelection(userId: string): Promise<void>;
 }
 
 export interface IStorageProvider {

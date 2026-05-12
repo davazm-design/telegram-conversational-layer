@@ -108,6 +108,16 @@ export interface ActionResult {
   success: boolean;
   message: string;
   data?: unknown;
+  /**
+   * Opcional: tras enviar `message` al usuario, el orquestador setea este
+   * `pending_input` para que el SIGUIENTE mensaje del usuario sea tratado
+   * como valor del parámetro indicado. Útil para flujos conversacionales
+   * multi-paso (ej: /agenda → dump → selection).
+   *
+   * Slash commands escapan pending_input (fix global existente), así que el
+   * usuario puede salirse del flujo en cualquier momento.
+   */
+  pendingInput?: { action: string; paramName: string; prompt: string };
 }
 
 /**

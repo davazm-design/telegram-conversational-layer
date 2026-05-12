@@ -263,6 +263,48 @@ class PostgresAdhdCoachStore implements IAdhdCoachStore {
       [this.domainId, userId]
     );
   }
+
+  // ── Selección de agenda pendiente ───────────────────────────────────────
+  // type='agenda_selection', text=JSON.stringify(items[]). Único por usuario.
+  async setPendingAgendaSelection(
+    userId: string,
+    items: Array<{ text: string; category: string }>,
+  ): Promise<void> {
+    await this.pool.query(
+      `DELETE FROM adhd_items WHERE domain_id = $1 AND user_id = $2 AND type = 'agenda_selection'`,
+      [this.domainId, userId]
+    );
+    await this.pool.query(
+      `INSERT INTO adhd_items (domain_id, user_id, type, text, completed)
+       VALUES ($1, $2, 'agenda_selection', $3, false)`,
+      [this.domainId, userId, JSON.stringify(items)]
+    );
+  }
+  async getPendingAgendaSelection(userId: string) {
+    const res = await this.pool.query(
+      `SELECT text FROM adhd_items
+       WHERE domain_id = $1 AND user_id = $2 AND type = 'agenda_selection'
+       ORDER BY created_at DESC LIMIT 1`,
+      [this.domainId, userId]
+    );
+    if (res.rows.length === 0) return null;
+    try {
+      const parsed = JSON.parse(res.rows[0].text);
+      if (!Array.isArray(parsed)) return null;
+      return parsed.map((p: { text: string; category: string }) => ({
+        text: String(p.text ?? ''),
+        category: String(p.category ?? 'otros'),
+      }));
+    } catch {
+      return null;
+    }
+  }
+  async clearPendingAgendaSelection(userId: string): Promise<void> {
+    await this.pool.query(
+      `DELETE FROM adhd_items WHERE domain_id = $1 AND user_id = $2 AND type = 'agenda_selection'`,
+      [this.domainId, userId]
+    );
+  }
 }
 
 export class PostgresStorageProvider implements IStorageProvider {

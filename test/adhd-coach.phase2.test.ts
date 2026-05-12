@@ -232,16 +232,15 @@ describe('adhd-coach Fase 2 — capabilities nuevas', () => {
     );
     const r = lastReply() ?? '';
     expect(r).toContain('Lo separé así');
-    // junta + responder correos → laboral
-    expect(r).toMatch(/Laboral:.*junta.*correos|Laboral:.*correos.*junta/i);
-    // pagar tarjeta → mantenimiento
-    expect(r).toMatch(/Mantenimiento:.*pagar tarjeta/i);
-    // orar → espiritual
-    expect(r).toMatch(/Espiritual:.*orar/i);
-    // hacer ejercicio → personal
-    expect(r).toMatch(/Personal:.*hacer ejercicio/i);
-    // pregunta final
-    expect(r).toContain('¿Eliges 3 importantes y 1 de mantenimiento');
+    // Formato nuevo (refactor): lista numerada "N. <texto> — <categoría>".
+    expect(r).toMatch(/junta.*— laboral/i);
+    expect(r).toMatch(/responder correos.*— laboral/i);
+    expect(r).toMatch(/pagar tarjeta.*— mantenimiento/i);
+    expect(r).toMatch(/orar.*— espiritual/i);
+    expect(r).toMatch(/hacer ejercicio.*— personal/i);
+    // El refactor pide selección, no "elige 3 importantes y 1 de mantenimiento".
+    expect(r).toMatch(/Cu[áa]les eliges/i);
+    expect(r).toMatch(/n[úu]meros|todos|repitiendo/i);
   });
 
   // Bonus: agenda con menos de 3 items NO debe disparar la rule de clasificación
