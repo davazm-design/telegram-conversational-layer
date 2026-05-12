@@ -117,6 +117,37 @@ async function main() {
   await adapter.send('verlos');
   log('USER: verlos', adapter.last());
 
+  // ── Fechas naturales nuevas ─────────────────────────────────────────────
+  adapter.reset();
+  await adapter.send('/recordar pasado mañana 10:30am ir al pediatra');
+  log('USER: /recordar pasado mañana 10:30am ir al pediatra', adapter.last());
+
+  adapter.reset();
+  await adapter.send('/recordar el jueves 14 de mayo a las 10:30am ir con doctor');
+  log('USER: /recordar el jueves 14 de mayo a las 10:30am ir con doctor', adapter.last());
+
+  adapter.reset();
+  await adapter.send('/recordar 14/05 ir al pediatra');
+  log('USER: /recordar 14/05 ir al pediatra', adapter.last());
+  adapter.reset();
+  await adapter.send('9am');
+  log('USER: 9am (completa draft 14/05)', adapter.last());
+
+  adapter.reset();
+  await adapter.send('/recordar jueves ir al gimnasio');
+  log('USER: /recordar jueves ir al gimnasio', adapter.last());
+  adapter.reset();
+  await adapter.send('7am');
+  log('USER: 7am (completa draft jueves)', adapter.last());
+
+  adapter.reset();
+  await adapter.send('/recordar 2026-05-14 10:30 ir al pediatra');
+  log('USER: /recordar 2026-05-14 10:30 ir al pediatra', adapter.last());
+
+  adapter.reset();
+  await adapter.send('/recordatorios');
+  log('USER: /recordatorios (final)', adapter.last());
+
   // 12) Silencio + tick con vencido → no debe enviar
   adapter.reset();
   await adapter.send('/silencio 2h');

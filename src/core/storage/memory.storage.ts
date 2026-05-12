@@ -67,7 +67,7 @@ class MemoryAdhdCoachStore implements IAdhdCoachStore {
   private silenceUntil = new Map<string, string>();
   // Fase 3: reminders
   private reminders = new Map<string, MemoryReminder[]>();
-  private reminderDraft = new Map<string, { text: string; dayHint: 'tomorrow' | 'today' | 'unspecified' }>();
+  private reminderDraft = new Map<string, { text: string; dayHint: string }>();
   private overdueSummary = new Map<string, { reminderIds: string[] }>();
   private reminderSeq = 0;
   private key(userId: string) { return `${this.domainId}:${userId}`; }
@@ -184,7 +184,7 @@ class MemoryAdhdCoachStore implements IAdhdCoachStore {
     }
   }
 
-  async setPendingReminderDraft(userId: string, draft: { text: string; dayHint: 'tomorrow' | 'today' | 'unspecified' }) {
+  async setPendingReminderDraft(userId: string, draft: { text: string; dayHint: string }) {
     this.reminderDraft.set(this.key(userId), { ...draft });
   }
   async getPendingReminderDraft(userId: string) {

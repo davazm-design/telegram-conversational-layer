@@ -205,7 +205,7 @@ class PostgresAdhdCoachStore implements IAdhdCoachStore {
   // borrar-antes-insertar para idempotencia.
   async setPendingReminderDraft(
     userId: string,
-    draft: { text: string; dayHint: 'tomorrow' | 'today' | 'unspecified' },
+    draft: { text: string; dayHint: string },
   ): Promise<void> {
     await this.pool.query(
       `DELETE FROM adhd_items WHERE domain_id = $1 AND user_id = $2 AND type = 'reminder_draft'`,
@@ -225,7 +225,7 @@ class PostgresAdhdCoachStore implements IAdhdCoachStore {
       [this.domainId, userId]
     );
     if (res.rows.length === 0) return null;
-    return { text: res.rows[0].text, dayHint: res.rows[0].date as 'tomorrow' | 'today' | 'unspecified' };
+    return { text: res.rows[0].text, dayHint: String(res.rows[0].date) };
   }
   async clearPendingReminderDraft(userId: string): Promise<void> {
     await this.pool.query(

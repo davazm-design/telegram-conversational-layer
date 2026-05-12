@@ -86,8 +86,101 @@ function classifyItem(item: string): Category {
 type ParseResult =
   | { ok: true; dueAt: Date; text: string }
   | { ok: false; reason: 'tomorrow_needs_hour'; text: string }
+  | { ok: false; reason: 'date_needs_hour'; text: string; dayHint: string }
   | { ok: false; reason: 'missing_text' }
   | { ok: false; reason: 'missing_time' };
+
+// ── Diccionarios ES para fechas naturales ───────────────────────────────────
+const DOW_NAMES: Record<string, number> = {
+  domingo: 0, lunes: 1, martes: 2, miercoles: 3,
+  jueves: 4, viernes: 5, sabado: 6,
+};
+const MONTH_NAMES: Record<string, number> = {
+  enero: 0, febrero: 1, marzo: 2, abril: 3, mayo: 4, junio: 5,
+  julio: 6, agosto: 7, septiembre: 8, sept: 8, octubre: 9, noviembre: 10, diciembre: 11,
+};
+
+function dowFromName(name: string): number | null {
+  if (!name) return null;
+  return DOW_NAMES[name.toLowerCase()] ?? null;
+}
+function monthFromName(name: string): number | null {
+  if (!name) return null;
+  return MONTH_NAMES[name.toLowerCase()] ?? null;
+}
+function dowFromWallDate(year: number, month0: number, day: number): number {
+  // getUTCDay sobre una Date UTC siempre devuelve el dow correcto para esa
+  // fecha calendárica, independiente de TZ.
+  return new Date(Date.UTC(year, month0, day)).getUTCDay();
+}
+function isValidWallDate(year: number, month0: number, day: number): boolean {
+  if (year < 1970 || year > 3000) return false;
+  if (month0 < 0 || month0 > 11) return false;
+  if (day < 1 || day > 31) return false;
+  const d = new Date(Date.UTC(year, month0, day));
+  return d.getUTCFullYear() === year && d.getUTCMonth() === month0 && d.getUTCDate() === day;
+}
+
+function pad2(n: number): string { return String(n).padStart(2, '0'); }
+
+/** Codifica una fecha calendárica como dayHint serializable. */
+function encodeDateHint(year: number, month0: number, day: number): string {
+  return `date:${year}-${pad2(month0 + 1)}-${pad2(day)}`;
+}
+/** Codifica un día de la semana como dayHint serializable. */
+function encodeDowHint(dow: number): string {
+  return `dow:${dow}`;
+}
+
+type DecodedHint =
+  | { kind: 'today' | 'tomorrow' | 'unspecified' }
+  | { kind: 'date'; year: number; month0: number; day: number }
+  | { kind: 'dow'; dow: number };
+
+/** Decodifica el string almacenado como draft.dayHint. null si no parsea. */
+function decodeDayHint(hint: string): DecodedHint | null {
+  if (!hint) return null;
+  if (hint === 'today' || hint === 'tomorrow' || hint === 'unspecified') {
+    return { kind: hint };
+  }
+  let m = hint.match(/^date:(\d{4})-(\d{2})-(\d{2})$/);
+  if (m) {
+    const y = parseInt(m[1], 10);
+    const mo = parseInt(m[2], 10) - 1;
+    const d = parseInt(m[3], 10);
+    if (!isValidWallDate(y, mo, d)) return null;
+    return { kind: 'date', year: y, month0: mo, day: d };
+  }
+  m = hint.match(/^dow:(\d)$/);
+  if (m) {
+    const n = parseInt(m[1], 10);
+    if (n < 0 || n > 6) return null;
+    return { kind: 'dow', dow: n };
+  }
+  return null;
+}
+
+/** Pickea año (actual o siguiente) para que (month0, day) sea futuro respecto a `today`. */
+function pickFutureYear(today: WallCalendar, month0: number, day: number): number {
+  const todayMs = Date.UTC(today.year, today.month0, today.day);
+  const candMs = Date.UTC(today.year, month0, day);
+  return candMs >= todayMs ? today.year : today.year + 1;
+}
+
+/** Próxima fecha calendárica con ese dow desde `today` (today si dow es hoy). */
+function nextDowFromToday(today: WallCalendar, targetDow: number, strictlyAfter: boolean): WallCalendar {
+  const todayDow = dowFromWallDate(today.year, today.month0, today.day);
+  let delta = (targetDow - todayDow + 7) % 7;
+  if (strictlyAfter && delta === 0) delta = 7;
+  return addDays(today, delta);
+}
+
+/** Suma N días (puede ser 0..366) a una fecha calendárica con wrap correcto. */
+function addDays(d: WallCalendar, n: number): WallCalendar {
+  const t = new Date(Date.UTC(d.year, d.month0, d.day));
+  t.setUTCDate(t.getUTCDate() + n);
+  return { year: t.getUTCFullYear(), month0: t.getUTCMonth(), day: t.getUTCDate(), hour: 0, minute: 0 };
+}
 
 function normalizeForParse(s: string): string {
   return s
@@ -162,11 +255,166 @@ function makeDateInTz(year: number, month0: number, day: number, hour: number, m
   return new Date(candidate.getTime() - offsetMs);
 }
 
-/** Suma 1 día a una fecha de calendario, manejando wrap de mes/año. */
-function addOneDay(d: WallCalendar): WallCalendar {
-  const t = new Date(Date.UTC(d.year, d.month0, d.day));
-  t.setUTCDate(t.getUTCDate() + 1);
-  return { year: t.getUTCFullYear(), month0: t.getUTCMonth(), day: t.getUTCDate(), hour: 0, minute: 0 };
+// ── Date prefix parser ──────────────────────────────────────────────────────
+// Detecta el "prefijo de fecha" del spec y devuelve la fecha (o dow) + lo que
+// queda del string ("rest") para parsear como tiempo + texto.
+
+type DatePrefix =
+  | { kind: 'rel'; dayOffset: number }            // hoy=0, mañana=1, pasado mañana=2
+  | { kind: 'date'; year: number; month0: number; day: number }
+  | { kind: 'dow'; dow: number };
+
+interface DatePrefixMatch { prefix: DatePrefix; rest: string }
+
+function parseDatePrefix(norm: string, today: WallCalendar): DatePrefixMatch | null {
+  // Orden: más específico primero.
+
+  // "pasado manana"
+  let m = norm.match(/^pasado\s+manana(?:\s+(.*))?$/);
+  if (m) return { prefix: { kind: 'rel', dayOffset: 2 }, rest: (m[1] ?? '').trim() };
+
+  // "hoy" (consumido aqui solo si va seguido de tiempo o vacio, no como sustantivo)
+  m = norm.match(/^hoy(?:\s+(.*))?$/);
+  if (m) return { prefix: { kind: 'rel', dayOffset: 0 }, rest: (m[1] ?? '').trim() };
+
+  // "manana" → +1d. (debe ir despues de "pasado manana".)
+  m = norm.match(/^manana(?:\s+(.*))?$/);
+  if (m) return { prefix: { kind: 'rel', dayOffset: 1 }, rest: (m[1] ?? '').trim() };
+
+  // ISO "yyyy-mm-dd"
+  m = norm.match(/^(\d{4})-(\d{1,2})-(\d{1,2})(?:\s+(.*))?$/);
+  if (m) {
+    const y = parseInt(m[1], 10);
+    const mo = parseInt(m[2], 10) - 1;
+    const d = parseInt(m[3], 10);
+    if (!isValidWallDate(y, mo, d)) return null;
+    return { prefix: { kind: 'date', year: y, month0: mo, day: d }, rest: (m[4] ?? '').trim() };
+  }
+
+  // "[el] <dow> <dd> de <mes>"  → fecha explícita; ignora dow si discrepa.
+  m = norm.match(/^(?:el\s+)?([a-z]+)\s+(\d{1,2})\s+de\s+([a-z]+)(?:\s+(.*))?$/);
+  if (m) {
+    const dow = dowFromName(m[1]);
+    const day = parseInt(m[2], 10);
+    const month0 = monthFromName(m[3]);
+    if (dow !== null && month0 !== null) {
+      const year = pickFutureYear(today, month0, day);
+      if (!isValidWallDate(year, month0, day)) return null;
+      return { prefix: { kind: 'date', year, month0, day }, rest: (m[4] ?? '').trim() };
+    }
+  }
+
+  // "[el] <dd> de <mes>"  (sin dow)
+  m = norm.match(/^(?:el\s+)?(\d{1,2})\s+de\s+([a-z]+)(?:\s+(.*))?$/);
+  if (m) {
+    const day = parseInt(m[1], 10);
+    const month0 = monthFromName(m[2]);
+    if (month0 !== null) {
+      const year = pickFutureYear(today, month0, day);
+      if (!isValidWallDate(year, month0, day)) return null;
+      return { prefix: { kind: 'date', year, month0, day }, rest: (m[3] ?? '').trim() };
+    }
+  }
+
+  // "dd/mm" o "dd-mm" (sin año, current o next).
+  m = norm.match(/^(\d{1,2})[\/\-](\d{1,2})(?:\s+(.*))?$/);
+  if (m) {
+    const day = parseInt(m[1], 10);
+    const month0 = parseInt(m[2], 10) - 1;
+    if (month0 < 0 || month0 > 11) return null;
+    const year = pickFutureYear(today, month0, day);
+    if (!isValidWallDate(year, month0, day)) return null;
+    return { prefix: { kind: 'date', year, month0, day }, rest: (m[3] ?? '').trim() };
+  }
+
+  // "[el] <dow>"  (palabra única que sea día de la semana válido)
+  m = norm.match(/^(?:el\s+)?([a-z]+)(?:\s+(.*))?$/);
+  if (m) {
+    const dow = dowFromName(m[1]);
+    if (dow !== null) {
+      return { prefix: { kind: 'dow', dow }, rest: (m[2] ?? '').trim() };
+    }
+  }
+
+  return null;
+}
+
+// ── Time-from-start parser ──────────────────────────────────────────────────
+// Lee el inicio de `rest` y devuelve {hour, minute, restAfterTime} o null.
+
+function parseTimeFromStart(rest: string): { hour: number; minute: number; restAfter: string } | null {
+  if (!rest) return null;
+  // "[a las] HH:MM[am|pm] <text>"
+  let m = rest.match(/^(?:a\s+las\s+)?(\d{1,2}):(\d{2})\s*(am|pm)?\s+(.*)$/i);
+  if (m) {
+    const h = hourTo24(parseInt(m[1], 10), m[3]);
+    if (h === null) return null;
+    const mins = parseInt(m[2], 10);
+    if (mins < 0 || mins > 59) return null;
+    return { hour: h, minute: mins, restAfter: m[4].trim() };
+  }
+  // "[a las] HHam|pm <text>"  (sin minutos, requiere am/pm)
+  m = rest.match(/^(?:a\s+las\s+)?(\d{1,2})\s*(am|pm)\s+(.*)$/i);
+  if (m) {
+    const h = hourTo24(parseInt(m[1], 10), m[2]);
+    if (h === null) return null;
+    return { hour: h, minute: 0, restAfter: m[3].trim() };
+  }
+  // "a las HH <text>"  (requiere prefijo "a las" para desambiguar)
+  m = rest.match(/^a\s+las\s+(\d{1,2})\s+(.*)$/i);
+  if (m) {
+    const h = hourTo24(parseInt(m[1], 10), undefined);
+    if (h === null) return null;
+    return { hour: h, minute: 0, restAfter: m[2].trim() };
+  }
+  return null;
+}
+
+// ── Resolución de fecha + hora → Date UTC ───────────────────────────────────
+
+function resolveDueFromPrefix(
+  prefix: DatePrefix,
+  hour: number,
+  minute: number,
+  now: Date,
+  today: WallCalendar,
+  tz: string,
+): Date {
+  if (prefix.kind === 'rel') {
+    const target = addDays(today, prefix.dayOffset);
+    let due = makeDateInTz(target.year, target.month0, target.day, hour, minute, tz);
+    // Para dayOffset 0 (hoy): si ya pasó, NO flip automático — el usuario
+    // dijo explicitamente "hoy". Aceptamos que pueda ser un instante en el
+    // pasado y dejamos que el dispatcher lo trate como vencido. (En la
+    // práctica el patrón "HH:MM solo" cubre el caso "si pasó, mañana".)
+    return due;
+  }
+  if (prefix.kind === 'date') {
+    return makeDateInTz(prefix.year, prefix.month0, prefix.day, hour, minute, tz);
+  }
+  // dow: la primera ocurrencia (today inclusive) cuyo (date + hour) sea futuro.
+  let cand = nextDowFromToday(today, prefix.dow, false);
+  let due = makeDateInTz(cand.year, cand.month0, cand.day, hour, minute, tz);
+  if (due.getTime() <= now.getTime()) {
+    cand = addDays(cand, 7);
+    due = makeDateInTz(cand.year, cand.month0, cand.day, hour, minute, tz);
+  }
+  return due;
+}
+
+/** Codifica un DatePrefix sin hora como dayHint para el draft. */
+function encodePrefixAsHint(prefix: DatePrefix, today: WallCalendar): string {
+  if (prefix.kind === 'rel') {
+    if (prefix.dayOffset === 0) return 'today';
+    if (prefix.dayOffset === 1) return 'tomorrow';
+    // pasado mañana o más: codificar como fecha concreta
+    const t = addDays(today, prefix.dayOffset);
+    return encodeDateHint(t.year, t.month0, t.day);
+  }
+  if (prefix.kind === 'date') {
+    return encodeDateHint(prefix.year, prefix.month0, prefix.day);
+  }
+  return encodeDowHint(prefix.dow);
 }
 
 export function parseReminderSpec(spec: string, now: Date = new Date()): ParseResult {
@@ -175,7 +423,9 @@ export function parseReminderSpec(spec: string, now: Date = new Date()): ParseRe
   const tz = reminderTz();
   const today = getCalendarPartsInTz(now, tz);
 
-  // 1) "en X (min|h|d) <texto>" — relativo, TZ-independent
+  // (0) Relativo "en X (min|h|d) <texto>" — TZ-independent, no requiere
+  //     prefijo de fecha. Mantener primero porque "en 2h tomar agua" no
+  //     debe matchear nada de la cascada de fechas.
   let m = norm.match(/^en\s+(\d+)\s*(min(?:utos?)?|h|hora|horas|d|dia|dias)\b\s*(.*)$/);
   if (m) {
     const n = parseInt(m[1], 10);
@@ -189,43 +439,35 @@ export function parseReminderSpec(spec: string, now: Date = new Date()): ParseRe
     return { ok: true, dueAt: new Date(now.getTime() + ms), text: capFirst(text) };
   }
 
-  // 2) "hoy [a las] HH[:MM] [am|pm] <texto>" — wall time HOY en TZ del usuario
-  m = norm.match(/^hoy\s+(?:a\s+las\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s+(.+)$/);
-  if (m) {
-    const h = hourTo24(parseInt(m[1], 10), m[3]);
-    if (h === null) return { ok: false, reason: 'missing_time' };
-    const mins = m[2] ? parseInt(m[2], 10) : 0;
-    if (mins < 0 || mins > 59) return { ok: false, reason: 'missing_time' };
-    const text = m[4].trim();
+  // (1) Intentar prefijo de fecha (hoy / manana / pasado manana / dow /
+  //     dow+dd+mes / dd de mes / dd/mm / yyyy-mm-dd).
+  const datePrefix = parseDatePrefix(norm, today);
+  if (datePrefix) {
+    const timePart = parseTimeFromStart(datePrefix.rest);
+    if (timePart) {
+      const text = timePart.restAfter.trim();
+      if (!text) return { ok: false, reason: 'missing_text' };
+      const due = resolveDueFromPrefix(datePrefix.prefix, timePart.hour, timePart.minute, now, today, tz);
+      return { ok: true, dueAt: due, text: capFirst(text) };
+    }
+    // Hay fecha pero NO hora → guardar draft y pedir hora.
+    const text = datePrefix.rest.trim();
     if (!text) return { ok: false, reason: 'missing_text' };
-    const due = makeDateInTz(today.year, today.month0, today.day, h, mins, tz);
-    return { ok: true, dueAt: due, text: capFirst(text) };
+    if (datePrefix.prefix.kind === 'rel' && datePrefix.prefix.dayOffset === 1) {
+      // "manana <texto>" mantiene el reason histórico para preservar el
+      // mensaje conocido y los tests existentes.
+      return { ok: false, reason: 'tomorrow_needs_hour', text: capFirst(text) };
+    }
+    return {
+      ok: false,
+      reason: 'date_needs_hour',
+      text: capFirst(text),
+      dayHint: encodePrefixAsHint(datePrefix.prefix, today),
+    };
   }
 
-  // 3) "manana [a las] HH[:MM] [am|pm] <texto>" — wall time MAÑANA en TZ
-  m = norm.match(/^manana\s+(?:a\s+las\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s+(.+)$/);
-  if (m) {
-    const h = hourTo24(parseInt(m[1], 10), m[3]);
-    if (h === null) return { ok: false, reason: 'missing_time' };
-    const mins = m[2] ? parseInt(m[2], 10) : 0;
-    if (mins < 0 || mins > 59) return { ok: false, reason: 'missing_time' };
-    const text = m[4].trim();
-    if (!text) return { ok: false, reason: 'missing_text' };
-    const tomorrow = addOneDay(today);
-    const due = makeDateInTz(tomorrow.year, tomorrow.month0, tomorrow.day, h, mins, tz);
-    return { ok: true, dueAt: due, text: capFirst(text) };
-  }
-
-  // 4) "manana <texto>" sin hora explícita → pedir hora
-  m = norm.match(/^manana\s+(.+)$/);
-  if (m) {
-    const text = m[1].trim();
-    if (!text) return { ok: false, reason: 'missing_text' };
-    return { ok: false, reason: 'tomorrow_needs_hour', text: capFirst(text) };
-  }
-
-  // 5) "[a las] HH:MM <texto>" o "HHam/pm <texto>"
-  //    → hoy si futuro (en TZ del usuario), mañana si ya pasó.
+  // (2) Solo hora: "[a las] HH:MM <texto>" / "HHam/pm <texto>"
+  //     → hoy si futuro (en TZ del usuario), mañana si ya pasó.
   m = norm.match(/^(?:a\s+las\s+)?(\d{1,2})(?::(\d{2})|\s*(am|pm))\s+(.+)$/);
   if (m) {
     const h = hourTo24(parseInt(m[1], 10), m[3]);
@@ -236,7 +478,7 @@ export function parseReminderSpec(spec: string, now: Date = new Date()): ParseRe
     if (!text) return { ok: false, reason: 'missing_text' };
     let due = makeDateInTz(today.year, today.month0, today.day, h, mins, tz);
     if (due.getTime() <= now.getTime()) {
-      const tomorrow = addOneDay(today);
+      const tomorrow = addDays(today, 1);
       due = makeDateInTz(tomorrow.year, tomorrow.month0, tomorrow.day, h, mins, tz);
     }
     return { ok: true, dueAt: due, text: capFirst(text) };
@@ -245,25 +487,58 @@ export function parseReminderSpec(spec: string, now: Date = new Date()): ParseRe
   return { ok: false, reason: 'missing_time' };
 }
 
-/** Parsea SOLO una hora (sin texto). Usado para completar drafts pendientes. */
+/**
+ * Parsea SOLO una hora (sin texto) y produce un Date según el hint del draft.
+ * Mantiene la firma vieja (today|tomorrow) para compat con tests anteriores.
+ *
+ * Para drafts con dayHint serializado (date:YYYY-MM-DD / dow:N), usar
+ * `parseTimeForHint` que sí entiende todos los casos.
+ */
 export function parseTimeOnly(input: string, dayHint: 'today' | 'tomorrow', now: Date = new Date()): Date | null {
+  return parseTimeForHint(input, dayHint, now);
+}
+
+/**
+ * Parsea hora suelta + cualquier dayHint (string-codificado del draft) y
+ * devuelve la Date UTC final, o null si la hora no parsea.
+ */
+export function parseTimeForHint(input: string, hint: string, now: Date = new Date()): Date | null {
   const norm = normalizeForParse(input);
-  let m = norm.match(/^(?:manana\s+)?(?:a\s+las\s+)?(\d{1,2})(?::(\d{2})|\s*(am|pm))?$/);
-  if (!m) return null;
-  const h = hourTo24(parseInt(m[1], 10), m[3]);
+  const tm = norm.match(/^(?:manana\s+)?(?:a\s+las\s+)?(\d{1,2})(?::(\d{2})|\s*(am|pm))?$/);
+  if (!tm) return null;
+  const h = hourTo24(parseInt(tm[1], 10), tm[3]);
   if (h === null) return null;
-  const mins = m[2] ? parseInt(m[2], 10) : 0;
+  const mins = tm[2] ? parseInt(tm[2], 10) : 0;
   if (mins < 0 || mins > 59) return null;
   const tz = reminderTz();
   const today = getCalendarPartsInTz(now, tz);
-  const target = (dayHint === 'tomorrow' || norm.startsWith('manana')) ? addOneDay(today) : today;
-  let due = makeDateInTz(target.year, target.month0, target.day, h, mins, tz);
-  if (dayHint === 'today' && due.getTime() <= now.getTime()) {
-    // si era hoy pero ya pasó, pasa a mañana automáticamente
-    const tomorrow = addOneDay(today);
-    due = makeDateInTz(tomorrow.year, tomorrow.month0, tomorrow.day, h, mins, tz);
+  const decoded = decodeDayHint(hint) ?? { kind: 'tomorrow' as const };
+
+  if (decoded.kind === 'today') {
+    let due = makeDateInTz(today.year, today.month0, today.day, h, mins, tz);
+    if (due.getTime() <= now.getTime()) {
+      const tmw = addDays(today, 1);
+      due = makeDateInTz(tmw.year, tmw.month0, tmw.day, h, mins, tz);
+    }
+    return due;
   }
-  return due;
+  if (decoded.kind === 'tomorrow' || decoded.kind === 'unspecified') {
+    const tmw = addDays(today, 1);
+    return makeDateInTz(tmw.year, tmw.month0, tmw.day, h, mins, tz);
+  }
+  if (decoded.kind === 'date') {
+    return makeDateInTz(decoded.year, decoded.month0, decoded.day, h, mins, tz);
+  }
+  if (decoded.kind === 'dow') {
+    let cand = nextDowFromToday(today, decoded.dow, false);
+    let due = makeDateInTz(cand.year, cand.month0, cand.day, h, mins, tz);
+    if (due.getTime() <= now.getTime()) {
+      cand = addDays(cand, 7);
+      due = makeDateInTz(cand.year, cand.month0, cand.day, h, mins, tz);
+    }
+    return due;
+  }
+  return null;
 }
 
 function splitTaskDump(text: string): string[] {
@@ -1021,7 +1296,7 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
     const parsed = parseReminderSpec(spec);
     if (!parsed.ok) {
       if (parsed.reason === 'tomorrow_needs_hour') {
-        // Guardar el draft y pedir hora explícita
+        // Guardar el draft y pedir hora explícita (mensaje histórico).
         await this.store.setPendingReminderDraft(userId, {
           text: parsed.text,
           dayHint: 'tomorrow',
@@ -1029,6 +1304,19 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
         return {
           success: true,
           message: `🕒 ¿A qué hora mañana quieres que te recuerde "${parsed.text}"? (Ej: 9am, 15:00)`,
+        };
+      }
+      if (parsed.reason === 'date_needs_hour') {
+        // Fecha (pasado mañana / día semana / dd/mm / yyyy-mm-dd) sin hora.
+        // Guardar draft con dayHint serializado para que parseTimeForHint
+        // pueda completarlo cuando llegue la hora.
+        await this.store.setPendingReminderDraft(userId, {
+          text: parsed.text,
+          dayHint: parsed.dayHint,
+        });
+        return {
+          success: true,
+          message: '🕒 ¿A qué hora quieres que te lo recuerde ese día? (Ej: 9am, 15:00)',
         };
       }
       if (parsed.reason === 'missing_text') {
@@ -1040,8 +1328,9 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
       return {
         success: false,
         message:
-          '⚠️ No entendí el tiempo. Usa: "en 2h <texto>", "hoy 18:00 <texto>", ' +
-          '"mañana 9am <texto>", o "15:00 <texto>".',
+          '⚠️ No entendí el tiempo. Usa: "en 2h <texto>", "mañana 9am <texto>", ' +
+          '"pasado mañana 10:30am <texto>", "jueves 10:30 <texto>" ' +
+          'o "14/05 10:30 <texto>".',
       };
     }
     const { id } = await this.store.addReminder(userId, parsed.text, parsed.dueAt.toISOString());
@@ -1115,9 +1404,10 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
       };
     }
     const timeSpec = String(params.timeSpec ?? '').trim();
-    const hint: 'today' | 'tomorrow' =
-      draft.dayHint === 'today' ? 'today' : 'tomorrow';
-    const due = parseTimeOnly(timeSpec, hint);
+    // parseTimeForHint maneja todos los formatos de dayHint (literales +
+    // 'date:YYYY-MM-DD' + 'dow:N'). El draft de "manana" sigue funcionando
+    // porque hint='tomorrow' es uno de los casos soportados.
+    const due = parseTimeForHint(timeSpec, draft.dayHint);
     if (!due) {
       return {
         success: false,

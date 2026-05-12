@@ -66,11 +66,17 @@ export interface IAdhdCoachStore {
   postponeReminder(reminderId: string, newDueAtIso: string): Promise<void>;
 
   // ── Drafts (recordatorio esperando que el usuario indique hora) ────────
+  // dayHint es `string` para soportar:
+  //   - literales: 'tomorrow' | 'today' | 'unspecified' (compat existente)
+  //   - fecha especifica: 'date:YYYY-MM-DD'
+  //   - dia de la semana: 'dow:N' (0=Dom .. 6=Sab)
+  // La capa de storage NO interpreta el string; solo lo pasa por la columna
+  // TEXT existente. No requiere migraciones.
   setPendingReminderDraft(
     userId: string,
-    draft: { text: string; dayHint: 'tomorrow' | 'today' | 'unspecified' },
+    draft: { text: string; dayHint: string },
   ): Promise<void>;
-  getPendingReminderDraft(userId: string): Promise<{ text: string; dayHint: 'tomorrow' | 'today' | 'unspecified' } | null>;
+  getPendingReminderDraft(userId: string): Promise<{ text: string; dayHint: string } | null>;
   clearPendingReminderDraft(userId: string): Promise<void>;
 
   // ── Resumen de recordatorios acumulados durante silencio ───────────────

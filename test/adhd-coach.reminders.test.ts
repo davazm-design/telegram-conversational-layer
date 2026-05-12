@@ -14,6 +14,7 @@ import { Orchestrator } from '../src/index';
 import {
   parseReminderSpec,
   parseTimeOnly,
+  parseTimeForHint,
   AdhdCoachDomainHandler,
 } from '../src/examples/adhd-coach.domain';
 import {
@@ -217,6 +218,144 @@ describe('parseReminderSpec — tiempos absolutos/relativos (TZ-aware MX)', () =
       // se ve como 11:00 MX en /recordatorios.
       expect(r.dueAt.toISOString()).toBe('2026-05-13T17:00:00.000Z');
     }
+  });
+
+  // ── Fechas naturales en español (nueva expansión del parser) ────────────
+  // now = 2026-05-12T16:00:00.000Z = martes 10:00 MX.
+
+  test('"pasado mañana 10:30am ir al pediatra" → 10:30 MX +2d', () => {
+    const r = parseReminderSpec('pasado mañana 10:30am ir al pediatra', now);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      const w = wallInTz(r.dueAt, MX);
+      expect(w).toEqual({ year: 2026, month: 5, day: 14, hour: 10, minute: 30 });
+      expect(r.dueAt.toISOString()).toBe('2026-05-14T16:30:00.000Z');
+      expect(r.text).toBe('Ir al pediatra');
+    }
+  });
+
+  test('"pasado mañana a las 10:30 ir al pediatra" → +2d con prefijo "a las"', () => {
+    const r = parseReminderSpec('pasado mañana a las 10:30 ir al pediatra', now);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.dueAt.toISOString()).toBe('2026-05-14T16:30:00.000Z');
+    }
+  });
+
+  test('"pasado mañana ir al pediatra" SIN hora → date_needs_hour con dayHint=date:YYYY-MM-DD', () => {
+    const r = parseReminderSpec('pasado mañana ir al pediatra', now);
+    expect(r.ok).toBe(false);
+    if (!r.ok && r.reason === 'date_needs_hour') {
+      expect(r.text).toBe('Ir al pediatra');
+      expect(r.dayHint).toBe('date:2026-05-14');
+    }
+  });
+
+  test('"jueves 10:30am ir al pediatra" → próximo jueves futuro (May 14)', () => {
+    // martes May 12 + 2d = jueves May 14
+    const r = parseReminderSpec('jueves 10:30am ir al pediatra', now);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      const w = wallInTz(r.dueAt, MX);
+      expect(w).toEqual({ year: 2026, month: 5, day: 14, hour: 10, minute: 30 });
+      expect(r.dueAt.toISOString()).toBe('2026-05-14T16:30:00.000Z');
+    }
+  });
+
+  test('"el jueves a las 10:30 ir con doctor" → próximo jueves 10:30 MX', () => {
+    const r = parseReminderSpec('el jueves a las 10:30 ir con doctor', now);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.dueAt.toISOString()).toBe('2026-05-14T16:30:00.000Z');
+      expect(r.text).toBe('Ir con doctor');
+    }
+  });
+
+  test('"jueves ir al pediatra" SIN hora → date_needs_hour con dayHint=dow:4', () => {
+    const r = parseReminderSpec('jueves ir al pediatra', now);
+    expect(r.ok).toBe(false);
+    if (!r.ok && r.reason === 'date_needs_hour') {
+      expect(r.text).toBe('Ir al pediatra');
+      expect(r.dayHint).toBe('dow:4');
+    }
+  });
+
+  test('"jueves 14 de mayo 10:30am ir al pediatra" → fecha explícita', () => {
+    const r = parseReminderSpec('jueves 14 de mayo 10:30am ir al pediatra', now);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.dueAt.toISOString()).toBe('2026-05-14T16:30:00.000Z');
+      expect(r.text).toBe('Ir al pediatra');
+    }
+  });
+
+  test('"el jueves 14 de mayo a las 10:30am ir con doctor"', () => {
+    const r = parseReminderSpec('el jueves 14 de mayo a las 10:30am ir con doctor', now);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.dueAt.toISOString()).toBe('2026-05-14T16:30:00.000Z');
+      expect(r.text).toBe('Ir con doctor');
+    }
+  });
+
+  test('"14/05 10:30 ir al pediatra" → 14 mayo (año actual si futuro)', () => {
+    const r = parseReminderSpec('14/05 10:30 ir al pediatra', now);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.dueAt.toISOString()).toBe('2026-05-14T16:30:00.000Z');
+    }
+  });
+
+  test('"14-05 10:30 ir al pediatra" → guion también funciona', () => {
+    const r = parseReminderSpec('14-05 10:30 ir al pediatra', now);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.dueAt.toISOString()).toBe('2026-05-14T16:30:00.000Z');
+    }
+  });
+
+  test('"14/05 ir al pediatra" SIN hora → date_needs_hour', () => {
+    const r = parseReminderSpec('14/05 ir al pediatra', now);
+    expect(r.ok).toBe(false);
+    if (!r.ok && r.reason === 'date_needs_hour') {
+      expect(r.text).toBe('Ir al pediatra');
+      expect(r.dayHint).toBe('date:2026-05-14');
+    }
+  });
+
+  test('"01/03 ir al pediatra" → marzo ya pasó → próximo año (2027)', () => {
+    const r = parseReminderSpec('01/03 10:30 ir al pediatra', now);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      // 1 marzo 2027 10:30 MX = 1 marzo 2027 16:30 UTC
+      expect(r.dueAt.toISOString()).toBe('2027-03-01T16:30:00.000Z');
+    }
+  });
+
+  test('"2026-05-14 10:30 ir al pediatra" → ISO directo, hora local MX', () => {
+    const r = parseReminderSpec('2026-05-14 10:30 ir al pediatra', now);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.dueAt.toISOString()).toBe('2026-05-14T16:30:00.000Z');
+    }
+  });
+
+  test('"2026-02-30 10:30 inválido" → null (fecha inexistente)', () => {
+    const r = parseReminderSpec('2026-02-30 10:30 invalido', now);
+    expect(r.ok).toBe(false);
+  });
+
+  test('parseTimeForHint con "date:2026-05-14" y "9am" → ISO 15:00 UTC', () => {
+    const r = parseTimeForHint('9am', 'date:2026-05-14', now);
+    expect(r).not.toBeNull();
+    expect(r!.toISOString()).toBe('2026-05-14T15:00:00.000Z');
+  });
+
+  test('parseTimeForHint con "dow:4" (jueves) y "9am" en martes → próximo jueves 9am', () => {
+    const r = parseTimeForHint('9am', 'dow:4', now);
+    expect(r).not.toBeNull();
+    // martes May 12 → jueves May 14 9am MX = 15:00 UTC
+    expect(r!.toISOString()).toBe('2026-05-14T15:00:00.000Z');
   });
 });
 
@@ -496,6 +635,86 @@ describe('Capabilities Fase 3 — add/list/cancel', () => {
     // El texto del usuario aparece, con su underscore escapado para
     // sobrevivir a Markdown v1.
     expect(r).toMatch(/maria\\_perez confirmar/);
+  });
+
+  // ── Fechas naturales — flujo completo via /recordar ─────────────────────
+  // Estas pruebas usan Date.now() real, así que solo verifican estructura
+  // (mensaje y persistencia), no fecha exacta. Las pruebas de TZ exacta
+  // viven en la suite del parser arriba con `now` fijo.
+
+  test('/recordar pasado mañana 10:30am ir al pediatra → crea recordatorio', async () => {
+    await adapter.receive('/recordar pasado mañana 10:30am ir al pediatra');
+    expect(lastReply()).toMatch(/Recordatorio programado/);
+    expect(lastReply()).toContain('Ir al pediatra');
+    const list = await storage.adhdCoachStore.listReminders(user);
+    expect(list.length).toBe(1);
+    expect(list[0].text).toBe('Ir al pediatra');
+  });
+
+  test('/recordar pasado mañana ir al pediatra (sin hora) → pide hora, no crea', async () => {
+    await adapter.receive('/recordar pasado mañana ir al pediatra');
+    expect(lastReply()).toMatch(/A qué hora quieres que te lo recuerde ese día/i);
+    const list = await storage.adhdCoachStore.listReminders(user);
+    expect(list.length).toBe(0);
+    const draft = await storage.adhdCoachStore.getPendingReminderDraft(user);
+    expect(draft).not.toBeNull();
+    expect(draft!.text).toBe('Ir al pediatra');
+    expect(draft!.dayHint).toMatch(/^date:\d{4}-\d{2}-\d{2}$/);
+
+    // Completa con "9am" → crea recordatorio para esa fecha
+    adapter.reset();
+    await adapter.receive('9am');
+    expect(lastReply()).toMatch(/Te recuerdo "Ir al pediatra"/);
+    const list2 = await storage.adhdCoachStore.listReminders(user);
+    expect(list2.length).toBe(1);
+  });
+
+  test('/recordar jueves ir al pediatra (sin hora) → pide hora con draft dow:N', async () => {
+    await adapter.receive('/recordar jueves ir al pediatra');
+    expect(lastReply()).toMatch(/A qué hora quieres que te lo recuerde ese día/i);
+    const draft = await storage.adhdCoachStore.getPendingReminderDraft(user);
+    expect(draft).not.toBeNull();
+    expect(draft!.dayHint).toMatch(/^dow:[0-6]$/);
+
+    adapter.reset();
+    await adapter.receive('9am');
+    expect(lastReply()).toMatch(/Te recuerdo "Ir al pediatra"/);
+  });
+
+  test('/recordar 14/05 ir al pediatra (sin hora) → pide hora, completa con 9am', async () => {
+    await adapter.receive('/recordar 14/05 ir al pediatra');
+    expect(lastReply()).toMatch(/A qué hora quieres que te lo recuerde ese día/i);
+    const draft = await storage.adhdCoachStore.getPendingReminderDraft(user);
+    expect(draft!.dayHint).toMatch(/^date:\d{4}-05-14$/);
+
+    adapter.reset();
+    await adapter.receive('9am');
+    expect(lastReply()).toMatch(/Te recuerdo "Ir al pediatra"/);
+    expect(lastReply()).not.toMatch(/T\d{2}:\d{2}:\d{2}/); // sin ISO crudo
+  });
+
+  test('/recordar 2026-05-14 10:30 ir al pediatra → crea recordatorio', async () => {
+    await adapter.receive('/recordar 2026-05-14 10:30 ir al pediatra');
+    expect(lastReply()).toMatch(/Recordatorio programado/);
+    expect(lastReply()).toContain('Ir al pediatra');
+  });
+
+  test('fallback de error actualizado menciona los nuevos formatos', async () => {
+    await adapter.receive('/recordar texto basura sin tiempo');
+    const r = lastReply();
+    expect(r).toMatch(/No entendí el tiempo/);
+    expect(r).toMatch(/pasado mañana/);
+    expect(r).toMatch(/jueves/);
+    expect(r).toMatch(/14\/05|dd\/mm/);
+  });
+
+  test('fechas se muestran en hora LOCAL, nunca como ISO UTC crudo', async () => {
+    await adapter.receive('/recordar en 1h tomar agua');
+    const r = lastReply();
+    expect(r).not.toMatch(/T\d{2}:\d{2}:\d{2}\.\d{3}Z/);
+    expect(r).not.toMatch(/T\d{2}:\d{2}:\d{2}Z/);
+    // Debe contener un formato local DD/MM/YYYY, HH:MM o similar
+    expect(r).toMatch(/\d{1,2}\/\d{1,2}\/\d{4}/);
   });
 });
 
