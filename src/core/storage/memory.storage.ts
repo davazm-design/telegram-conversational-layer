@@ -1,0 +1,115 @@
+import { PendingInput } from '../../router/intent.router';
+import { IAdhdCoachStore, ISessionStore, IStorageProvider, ITodoStore } from './interfaces';
+
+class MemorySessionStore implements ISessionStore {
+  constructor(private domainId: string) {}
+  private pendingInputs = new Map<string, PendingInput>();
+  private pendingActions = new Map<string, string>();
+  private key(userId: string) { return `${this.domainId}:${userId}`; }
+
+  async getPendingInput(userId: string): Promise<PendingInput | null> {
+    return this.pendingInputs.get(this.key(userId)) ?? null;
+  }
+  async setPendingInput(userId: string, data: PendingInput): Promise<void> {
+    this.pendingInputs.set(this.key(userId), data);
+  }
+  async clearPendingInput(userId: string): Promise<void> {
+    this.pendingInputs.delete(this.key(userId));
+  }
+
+  async getPendingAction(userId: string): Promise<string | null> {
+    return this.pendingActions.get(this.key(userId)) ?? null;
+  }
+  async setPendingAction(userId: string, action: string): Promise<void> {
+    this.pendingActions.set(this.key(userId), action);
+  }
+  async clearPendingAction(userId: string): Promise<void> {
+    this.pendingActions.delete(this.key(userId));
+  }
+}
+
+class MemoryTodoStore implements ITodoStore {
+  constructor(private domainId: string) {}
+  private tasks = new Map<string, { text: string; completed: boolean }[]>();
+  private reminders = new Map<string, { text: string; completed: boolean }[]>();
+  private key(userId: string) { return `${this.domainId}:${userId}`; }
+
+  async getTasks(userId: string) { return this.tasks.get(this.key(userId)) ?? []; }
+  async addTask(userId: string, text: string) {
+    const list = await this.getTasks(userId);
+    list.push({ text, completed: false });
+    this.tasks.set(this.key(userId), list);
+  }
+  async clearTasks(userId: string) { this.tasks.delete(this.key(userId)); }
+
+  async getReminders(userId: string) { return this.reminders.get(this.key(userId)) ?? []; }
+  async addReminder(userId: string, text: string) {
+    const list = await this.getReminders(userId);
+    list.push({ text, completed: false });
+    this.reminders.set(this.key(userId), list);
+  }
+  async clearReminders(userId: string) { this.reminders.delete(this.key(userId)); }
+}
+
+class MemoryAdhdCoachStore implements IAdhdCoachStore {
+  constructor(private domainId: string) {}
+  private checkins = new Map<string, { date: string; completed: boolean }[]>();
+  private microTasks = new Map<string, { id: string; text: string; completed: boolean }[]>();
+  private focusSessions = new Map<string, { task: string; completed: boolean }[]>();
+  private key(userId: string) { return `${this.domainId}:${userId}`; }
+
+  async getCheckins(userId: string) { return this.checkins.get(this.key(userId)) ?? []; }
+  async addCheckin(userId: string, date: string) {
+    const list = await this.getCheckins(userId);
+    list.push({ date, completed: true });
+    this.checkins.set(this.key(userId), list);
+  }
+
+  async getMicroTasks(userId: string) { return this.microTasks.get(this.key(userId)) ?? []; }
+  async addMicroTask(userId: string, text: string) {
+    const list = await this.getMicroTasks(userId);
+    list.push({ id: String(list.length + 1), text, completed: false });
+    this.microTasks.set(this.key(userId), list);
+  }
+  async completeMicroTask(userId: string, taskId: string) {
+    const list = await this.getMicroTasks(userId);
+    const task = list.find((t) => t.id === taskId);
+    if (task) {
+      task.completed = true;
+      return true;
+    }
+    return false;
+  }
+
+  async getFocusSessions(userId: string) { return this.focusSessions.get(this.key(userId)) ?? []; }
+  async addFocusSession(userId: string, task: string) {
+    const list = await this.getFocusSessions(userId);
+    list.push({ task, completed: true });
+    this.focusSessions.set(this.key(userId), list);
+  }
+
+  async resetDay(userId: string) {
+    this.checkins.delete(this.key(userId));
+    this.microTasks.delete(this.key(userId));
+    this.focusSessions.delete(this.key(userId));
+  }
+}
+
+export class MemoryStorageProvider implements IStorageProvider {
+  sessionStore: ISessionStore;
+  todoStore: ITodoStore;
+  adhdCoachStore: IAdhdCoachStore;
+
+  constructor() {
+    this.sessionStore = new MemorySessionStore('default');
+    this.todoStore = new MemoryTodoStore('default');
+    this.adhdCoachStore = new MemoryAdhdCoachStore('default');
+  }
+
+  async connect(domainId: string): Promise<void> {
+    this.sessionStore = new MemorySessionStore(domainId);
+    this.todoStore = new MemoryTodoStore(domainId);
+    this.adhdCoachStore = new MemoryAdhdCoachStore(domainId);
+  }
+  async disconnect(): Promise<void> {}
+}

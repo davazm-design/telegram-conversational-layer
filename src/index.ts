@@ -1,0 +1,318 @@
+/**
+ * Main Orchestrator — wires all components together and processes messages.
+ *
+ * This is the central pipeline:
+ * Message → Session → [PendingInput check] → [Confirmation check] → Intent Router → Policy Engine → Execute → Respond
+ *
+ * The Orchestrator is domain-agnostic: it receives an IDomainHandler via constructor injection.
+ *
+ * PENDING INPUT: When an action requires follow-up text (e.g. "agregar tarea" without task text),
+ * the orchestrator stores a pending_input in the session. The next message from the user
+ * is treated as the missing parameter, and the action is executed automatically.
+ */
+
+import {
+  IMessageAdapter,
+  GenericMessage,
+  GenericResponse,
+  IDomainHandler,
+  IntentSource,
+} from './core/types';
+import { AppConfig, loadConfig } from './core/config';
+import { SessionManager } from './core/session.manager';
+import { CapabilityRegistry } from './registry/capability.registry';
+import { IntentRouter, PendingInput } from './router/intent.router';
+import { PolicyEngine, PolicyDecision } from './security/policy.engine';
+import { LLMFallback } from './llm/llm.fallback';
+import { OpenAIProvider } from './llm/openai.provider';
+import { ResponseFormatter } from './core/response.formatter';
+import { TelegramAdapter } from './adapter/telegram.adapter';
+import { logger, setLogLevel } from './core/logger';
+
+const COMPONENT = 'Orchestrator';
+
+
+
+export class Orchestrator {
+  private adapter: IMessageAdapter;
+  private sessions: SessionManager;
+  private registry: CapabilityRegistry;
+  private router: IntentRouter;
+  private policy: PolicyEngine;
+  private formatter: ResponseFormatter;
+  private domainName: string = 'Asistente';
+
+  constructor(
+    adapter: IMessageAdapter,
+    domainHandler: IDomainHandler,
+    config: AppConfig,
+    sessionStore: ISessionStore,
+  ) {
+    this.adapter = adapter;
+    this.sessions = new SessionManager(sessionStore);
+    this.registry = new CapabilityRegistry();
+    this.policy = new PolicyEngine();
+    this.formatter = new ResponseFormatter();
+    this.domainName = domainHandler.domainName;
+
+    // Register domain capabilities
+    this.registry.registerDomain(domainHandler);
+
+    // Build LLM fallback (optional)
+    let llmFallback: LLMFallback | null = null;
+    if (config.llm.enabled) {
+      try {
+        const provider = new OpenAIProvider(config.llm.openaiApiKey);
+        llmFallback = new LLMFallback(config.llm, provider);
+      } catch (err) {
+        logger.warn(COMPONENT, 'Failed to initialize LLM provider, continuing without it.', { error: String(err) });
+        llmFallback = new LLMFallback({ ...config.llm, enabled: false });
+      }
+    } else {
+      llmFallback = new LLMFallback(config.llm);
+    }
+
+    // Build router
+    this.router = new IntentRouter(
+      llmFallback,
+      () => this.registry.getAllCapabilities(),
+    );
+
+    // Register domain-specific commands and rules (if provided)
+    if (domainHandler.getCommands) {
+      this.router.addCommands(domainHandler.getCommands());
+    }
+    if (domainHandler.getRules) {
+      this.router.addRules(domainHandler.getRules());
+    }
+  }
+
+  async start(): Promise<void> {
+    await this.adapter.start(this.handleMessage.bind(this));
+    logger.info(COMPONENT, 'Orchestrator started.');
+  }
+
+  async stop(): Promise<void> {
+    await this.adapter.stop();
+    logger.info(COMPONENT, 'Orchestrator stopped.');
+  }
+
+  private async handleMessage(msg: GenericMessage): Promise<void> {
+    try {
+      // ── Step 0: Check for pending input ──────────────────────────────────
+      // If the user has a pending_input, the NEXT message is treated as the missing parameter.
+      // Exception: /cancel clears pending_input.
+      const pendingInput = await this.sessions.getContext(msg.userId, 'pending_input') as PendingInput | undefined;
+      if (pendingInput) {
+        const rawText = msg.text.trim();
+
+        // Allow /cancel and "cancelar" to break out of pending input
+        if (rawText.toLowerCase() === '/cancel' || rawText.toLowerCase() === 'cancelar') {
+          await this.sessions.clearContext(msg.userId, 'pending_input');
+          return this.respond(msg.chatId, '✅ Acción cancelada.');
+        }
+
+        // Use raw text as the parameter value (preserve original casing/accents for task text)
+        const params: Record<string, unknown> = { [pendingInput.paramName]: rawText };
+
+        // Clear pending input BEFORE executing (to prevent loops)
+        await this.sessions.clearContext(msg.userId, 'pending_input');
+
+        // Execute the action
+        const result = await this.registry.executeAction(pendingInput.action, params, msg.userId);
+        return this.respond(msg.chatId, this.formatter.formatResult(result));
+      }
+
+      // ── Step 1: Resolve intent ─────────────────────────────────────────
+      const intent = await this.router.resolve(msg);
+
+      // ── Step 2: Handle system actions ──────────────────────────────────
+      if (intent.action === 'system_start') {
+        return this.respond(msg.chatId, this.formatter.formatWelcome(this.domainName));
+      }
+
+      if (intent.action === 'system_help') {
+        return this.respond(msg.chatId, this.formatter.formatHelp(
+          this.registry.getAllCapabilities(),
+          this.domainName,
+        ));
+      }
+
+      if (intent.action === 'system_cancel') {
+        const hadPending = await this.sessions.clearPendingAction(msg.userId);
+        return this.respond(msg.chatId, this.formatter.formatCancelled(hadPending));
+      }
+
+      if (intent.action === 'system_status') {
+        const handler = this.registry.getHandler(
+          this.registry.getAllCapabilities()[0]?.name ?? '',
+        );
+        if (handler?.getStatusSummary) {
+          const summary = await handler.getStatusSummary(msg.userId);
+          return this.respond(msg.chatId, `📊 *Estado:* ${summary}`);
+        }
+        return this.respond(msg.chatId, 'ℹ️ No hay información de estado disponible.');
+      }
+
+      // ── Step 3: Handle confirmation flow ───────────────────────────────
+      if (intent.action === 'system_confirm') {
+        const pendingAction = await this.sessions.consumePendingAction(msg.userId);
+        if (!pendingAction) {
+          return this.respond(msg.chatId, 'ℹ️ No hay ninguna acción pendiente para confirmar.');
+        }
+        const result = await this.registry.executeAction(
+          pendingAction,
+          {},
+          msg.userId,
+        );
+        return this.respond(msg.chatId, this.formatter.formatResult(result));
+      }
+
+      // ── Step 4: Handle unknown intent ──────────────────────────────────
+      if (intent.action === 'unknown') {
+        return this.respond(msg.chatId, this.formatter.formatUnknown());
+      }
+
+      // ── Step 4.5: Check for incomplete input (pending_input) ───────────
+      // If the action requires a string parameter and it's empty,
+      // store pending_input and ask the user for the missing text.
+      const capability = this.registry.getCapability(intent.action);
+      if (capability) {
+        const missingParam = Object.entries(capability.parameters).find(
+          ([key, schema]) => schema.required && schema.type === 'string' && !String(intent.params[key] ?? '').trim()
+        );
+
+        if (missingParam) {
+          const [paramName, schema] = missingParam;
+          const prompt = `📝 Claro. ¿Cuál es el ${schema.description?.toLowerCase() ?? paramName}?`;
+          
+          const pendingInputData: PendingInput = {
+            action: intent.action,
+            paramName,
+            prompt,
+          };
+          await this.sessions.setContext(msg.userId, 'pending_input', pendingInputData);
+          logger.info(COMPONENT, 'Pending input set', { userId: msg.userId, action: intent.action });
+          return this.respond(msg.chatId, prompt);
+        }
+      }
+
+      // ── Step 5: Policy evaluation ──────────────────────────────────────
+      const policyResult = this.policy.evaluate(intent, capability);
+      const forceLowConfidence = this.policy.shouldConfirmLowConfidence(intent);
+
+      if (policyResult.decision === PolicyDecision.DENY) {
+        return this.respond(msg.chatId, `🚫 ${policyResult.reason}`);
+      }
+
+      if (policyResult.decision === PolicyDecision.CONFIRM || forceLowConfidence) {
+        const description = capability
+          ? `*${capability.description}*\n${this.formatParams(intent.params)}`
+          : intent.action;
+        await this.sessions.setPendingAction(msg.userId, intent, description);
+        return this.respond(msg.chatId, this.formatter.formatConfirmation(description));
+      }
+
+      // ── Step 6: Execute ────────────────────────────────────────────────
+      const result = await this.registry.executeAction(intent.action, intent.params, msg.userId);
+      return this.respond(msg.chatId, this.formatter.formatResult(result));
+
+    } catch (err) {
+      logger.error(COMPONENT, 'Unhandled error in message pipeline', { error: String(err) });
+      return this.respond(msg.chatId, '⚠️ Ocurrió un error inesperado. Inténtalo de nuevo.');
+    }
+  }
+
+  private async respond(chatId: string, text: string): Promise<void> {
+    await this.adapter.sendResponse({ chatId, text, parseMode: 'Markdown' });
+  }
+
+  private formatParams(params: Record<string, unknown>): string {
+    const entries = Object.entries(params).filter(([_, v]) => v !== undefined && v !== '');
+    if (entries.length === 0) return '';
+    return entries.map(([k, v]) => `  • ${k}: ${v}`).join('\n');
+  }
+}
+
+import { IStorageProvider, ISessionStore } from './core/storage/interfaces';
+import { MemoryStorageProvider } from './core/storage/memory.storage';
+import { PostgresStorageProvider } from './core/storage/postgres.storage';
+
+// ─── Domain Registry (for CLI selection) ─────────────────────────────────────
+
+/** Map of available domains for the main() entry point and simulator. */
+export function getDomainRegistry(storage: IStorageProvider): Record<string, () => IDomainHandler> {
+  // Lazy imports to avoid coupling at module level
+  return {
+    'todo': () => {
+      const { TodoDomainHandler } = require('./examples/todo.domain');
+      return new TodoDomainHandler(storage.todoStore);
+    },
+    'adhd-coach': () => {
+      const { AdhdCoachDomainHandler } = require('./examples/adhd-coach.domain');
+      return new AdhdCoachDomainHandler(storage.adhdCoachStore);
+    },
+  };
+}
+
+// ─── Main Entry Point ────────────────────────────────────────────────────────
+
+async function main(): Promise<void> {
+  const config = loadConfig();
+  setLogLevel(config.logLevel);
+
+  logger.info(COMPONENT, 'Starting Universal Telegram Conversational Layer...');
+
+  if (!config.telegram.botToken) {
+    console.error('ERROR: TELEGRAM_BOT_TOKEN is not set. Copy .env.example to .env and configure it.');
+    process.exit(1);
+  }
+
+  // Initialize storage
+  let storage: IStorageProvider;
+  if (config.storage.provider === 'postgres') {
+    logger.info(COMPONENT, 'Initializing PostgreSQL Storage Provider');
+    storage = new PostgresStorageProvider(config.storage.databaseUrl);
+  } else {
+    logger.info(COMPONENT, 'Initializing Memory Storage Provider');
+    storage = new MemoryStorageProvider();
+  }
+  // Domain selection via DOMAIN env var (default: todo)
+  const domainKey = (process.env.DOMAIN ?? 'todo').toLowerCase();
+
+  await storage.connect(domainKey);
+
+  const registry = getDomainRegistry(storage);
+  const domainFactory = registry[domainKey];
+
+  if (!domainFactory) {
+    console.error(`ERROR: Unknown domain "${domainKey}". Available: ${Object.keys(registry).join(', ')}`);
+    process.exit(1);
+  }
+
+  const domain = domainFactory();
+  logger.info(COMPONENT, `Domain: ${domain.domainName}`);
+
+  const adapter = new TelegramAdapter(config);
+  const orchestrator = new Orchestrator(adapter, domain, config, storage.sessionStore);
+
+  // Graceful shutdown
+  const shutdown = async () => {
+    logger.info(COMPONENT, 'Shutting down...');
+    await orchestrator.stop();
+    await storage.disconnect();
+    process.exit(0);
+  };
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+
+  await orchestrator.start();
+}
+
+// Only run main() if this file is executed directly (not imported)
+if (require.main === module) {
+  main().catch((err) => {
+    console.error('Fatal error:', err);
+    process.exit(1);
+  });
+}
