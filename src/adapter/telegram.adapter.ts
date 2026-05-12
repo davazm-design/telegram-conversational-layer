@@ -86,18 +86,20 @@ export class TelegramAdapter implements IMessageAdapter {
       throw new Error('WEBHOOK_SECRET is required for webhook mode. It must not be empty.');
     }
 
-    const port = this.config.telegram.port || 3000;
+    const port = this.config.telegram.port || parseInt(process.env.PORT || '3000', 10);
     this.app = express();
+
+    // Health check endpoint (must be registered before any body parser or webhook)
+    this.app.get('/health', (req, res) => {
+      res.status(200).send('OK');
+    });
+
     this.app.use(express.json());
 
     const webhookPath = `/webhook/${this.config.telegram.webhookSecret}`;
     this.app.use(webhookPath, webhookCallback(this.bot, 'express'));
 
-    this.app.get('/health', (req, res) => {
-      res.status(200).send('OK');
-    });
-
-    this.server = this.app.listen(port, async () => {
+    this.server = this.app.listen(port, '0.0.0.0', async () => {
       logger.info(COMPONENT, `Express server listening on port ${port} for webhooks.`);
       const webhookUrl = `${this.config.telegram.publicWebhookUrl.replace(/\/$/, '')}${webhookPath}`;
       await this.bot.api.setWebhook(webhookUrl);
