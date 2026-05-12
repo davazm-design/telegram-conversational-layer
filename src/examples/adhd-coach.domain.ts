@@ -783,6 +783,28 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
         riskLevel: RiskLevel.READ_ONLY,
         requiresConfirmation: false,
       },
+      // ── Fase 4 (inicio): capa NL conversacional ligera (sin LLM) ─────────
+      {
+        name: 'explain_commands',
+        description: 'Explica para qué sirve cada comando del bot',
+        parameters: {},
+        riskLevel: RiskLevel.READ_ONLY,
+        requiresConfirmation: false,
+      },
+      {
+        name: 'explain_natural_language',
+        description: 'Explica cómo escribirle al bot en lenguaje natural',
+        parameters: {},
+        riskLevel: RiskLevel.READ_ONLY,
+        requiresConfirmation: false,
+      },
+      {
+        name: 'what_can_you_do',
+        description: 'Resumen humano de lo que el bot puede hacer',
+        parameters: {},
+        riskLevel: RiskLevel.READ_ONLY,
+        requiresConfirmation: false,
+      },
     ];
   }
 
@@ -860,7 +882,7 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
       // ── Fase 2 — /privacidad NL ──────────────────────────────────────────
       {
         patterns: [
-          /^(que sabes de mi|que guardas|ver mis datos|que datos tienes|que datos guardas)$/,
+          /^(que sabes de mi|que guardas(?:\s+de\s+mi)?|ver mis datos|que datos tienes|que datos guardas)$/,
         ],
         action: 'show_privacy',
       },
@@ -868,7 +890,7 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
       // ── Fase 2 — Borrado ─────────────────────────────────────────────────
       {
         patterns: [
-          /^(borrar todo|borralo todo|elimina mis datos|borra lo que sabes(?: de mi)?|elimina todo lo que tienes)$/,
+          /^(borrar todo|borralo todo|borra mis datos|elimina mis datos|borra lo que sabes(?: de mi)?|elimina todo lo que tienes)$/,
         ],
         action: 'delete_all_state',
       },
@@ -897,6 +919,8 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
       {
         patterns: [
           /^(organiza mi dia|ordena mi dia|ayudame con el dia)$/,
+          /^(quiero ordenar mi dia|ayudame a ordenar mi dia|quiero organizar mi dia)$/,
+          /^(estoy bloqueado|no se por donde empezar|no se que hacer)$/,
         ],
         action: 'agenda_start',
       },
@@ -954,6 +978,56 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
         ],
         action: 'show_crisis_resources',
       },
+
+      // ── Fase 4 — NL para acciones existentes ─────────────────────────────
+      {
+        patterns: [
+          /^(quiero ver mis recordatorios|muestrame mis recordatorios|ver mis recordatorios|cuales son mis recordatorios)$/,
+        ],
+        action: 'list_reminders',
+      },
+      {
+        // NL silencio con duración: "necesito silencio por 2 horas"
+        patterns: [
+          /^(?:necesito|quiero)\s+silencio\s+por\s+(\d+)\s*h(?:oras?)?$/,
+          /^(?:pausa|pausalos|pausa los)\s+mensajes\s+por\s+(\d+)\s*h(?:oras?)?$/,
+        ],
+        action: 'set_silence',
+        extractParams: (match) => ({ duration: `${match[1]}h` }),
+      },
+      {
+        // NL silencio sin duración explícita
+        patterns: [
+          /^(necesito silencio|pausa mensajes|pausa los mensajes|silencio por favor)$/,
+        ],
+        action: 'set_silence',
+        extractParams: () => ({ duration: '' }),
+      },
+
+      // ── Fase 4 — NL conversacional: explicaciones y orientación ──────────
+      // Activadores deliberadamente concretos para evitar falsos positivos.
+      {
+        patterns: [
+          /^(?:para que (?:me )?(?:sirve|sirven) (?:cada )?comando(?:s)?|que hace cada comando|explicame los comandos|como funcionan los comandos)$/,
+          /^(?:que (?:significa|hace)) (\/[a-z_]+)$/,
+          /^para que sirve (\/[a-z_]+)$/,
+        ],
+        action: 'explain_commands',
+      },
+      {
+        patterns: [
+          /^no dices que (?:tambien )?puedo escribir en lenguaje natural\??$/,
+          /^(?:como|de que forma) escribo en lenguaje natural\??$/,
+          /^(?:que puedo escribir sin comandos|no entiendo como hablarte|como te hablo)\??$/,
+        ],
+        action: 'explain_natural_language',
+      },
+      {
+        patterns: [
+          /^(?:que puedes hacer|como me ayudas|para que sirves|que haces|como te uso)\??$/,
+        ],
+        action: 'what_can_you_do',
+      },
     ];
   }
 
@@ -999,6 +1073,13 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
         return await this.completeReminderWithTime(userId, params);
       case 'show_overdue_reminders':
         return await this.showOverdueReminders(userId);
+      // ── Fase 4 NL ──
+      case 'explain_commands':
+        return this.explainCommands();
+      case 'explain_natural_language':
+        return this.explainNaturalLanguage();
+      case 'what_can_you_do':
+        return this.whatCanYouDo();
       default:
         return { success: false, message: `Acción "${action}" no implementada en ADHD Coach.` };
     }
@@ -1454,6 +1535,95 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
     }
     await this.store.clearPendingOverdueSummary(userId);
     return { success: true, message: lines.join('\n') };
+  }
+
+  // ─── Fase 4: NL conversacional ligera ──────────────────────────────────
+
+  private explainCommands(): ActionResult {
+    // Sin "_" ni "*" para sobrevivir Markdown v1 legacy de Telegram.
+    const message = [
+      'Claro. Te explico los principales:',
+      '',
+      '- /agenda: me vuelcas todo lo que tienes en la cabeza y lo ordeno.',
+      '- /recordar: programo un recordatorio con fecha y hora.',
+      '- /recordatorios: te muestro lo pendiente.',
+      '- /silencio: pauso mensajes proactivos.',
+      '- /abandonar: te ayudo a pausar antes de rendirte.',
+      '- /reinicio: vuelves al mínimo sin culpa.',
+      '- /privacidad: ves qué guardo y puedes borrar datos.',
+      '- /recursos: muestra líneas de apoyo.',
+      '- /checkin: registro tu check-in del día.',
+      '- /focus: te muestro tu foco y microtareas.',
+    ].join('\n');
+    return { success: true, message };
+  }
+
+  private explainNaturalLanguage(): ActionResult {
+    const message = [
+      'Sí puedes escribirme natural, pero todavía entiendo mejor frases concretas. Ejemplos:',
+      '',
+      '- "recuérdame mañana a las 9 llamar al doctor"',
+      '- "quiero ordenar mi día"',
+      '- "me rindo"',
+      '- "estoy bloqueado"',
+      '- "no sé por dónde empezar"',
+      '- "quiero ver mis recordatorios"',
+      '- "necesito silencio por 2 horas"',
+      '',
+      'Si algo no lo entiendo, puedes usar /help.',
+    ].join('\n');
+    return { success: true, message };
+  }
+
+  private whatCanYouDo(): ActionResult {
+    const message =
+      'Puedo ayudarte a ordenar el día, crear recordatorios, partir tareas grandes, ' +
+      'pausar antes de abandonar, reiniciar sin culpa, activar silencio, mostrar qué ' +
+      'datos guardo y darte recursos de apoyo si estás en riesgo.';
+    return { success: true, message };
+  }
+
+  /** Texto curado de /help (sin nombres internos de capabilities). */
+  getHelpText(): string {
+    return [
+      'Ayuda — ADHD Coach',
+      '',
+      'Comandos principales:',
+      '/agenda — ordenar tu día.',
+      '/recordar — crear recordatorios.',
+      '/recordatorios — ver pendientes.',
+      '/silencio — pausar mensajes proactivos.',
+      '/privacidad — ver qué guardo.',
+      '/abandonar — pausa antes de rendirte.',
+      '/reinicio — volver sin culpa.',
+      '/recursos — líneas de apoyo.',
+      '/checkin — registrar cómo vas.',
+      '/focus — ver foco y microtareas.',
+      '',
+      'Herramientas TCC (próximamente):',
+      '/rpec — ordenar pensamiento, emoción y conducta.',
+      '/reencuadre — revisar un pensamiento automático.',
+      '/dopar — resolver un problema paso a paso.',
+      '/revision — revisar patrones.',
+      '',
+      'Puedes escribir en lenguaje natural, por ejemplo:',
+      '- "recuérdame mañana a las 9 llamar al doctor"',
+      '- "me rindo"',
+      '- "quiero ordenar mi día"',
+      '- "no sé por dónde empezar"',
+      '- "estoy bloqueado"',
+      '- "qué puedes hacer"',
+      '- "para qué sirve /agenda"',
+    ].join('\n');
+  }
+
+  /** Mensaje cuando el router no resuelve la intención. */
+  getFallbackMessage(): string {
+    return (
+      'No lo entendí del todo. Puedo ayudarte con agenda, recordatorios, bloqueo, ' +
+      'reinicio, silencio o privacidad. Prueba: "qué puedes hacer", "quiero ordenar ' +
+      'mi día" o /help.'
+    );
   }
 
   /**

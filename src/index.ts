@@ -43,6 +43,10 @@ export class Orchestrator {
   private formatter: ResponseFormatter;
   private crisisDetector: CrisisDetector;
   private domainName: string = 'Asistente';
+  // Referencia al dominio para acceder a getHelpText/getFallbackMessage
+  // opcionales. El registry guarda handlers por capability; aquí queremos el
+  // handler del dominio principal para textos curados (help + fallback).
+  private domainHandler: IDomainHandler;
 
   constructor(
     adapter: IMessageAdapter,
@@ -61,6 +65,7 @@ export class Orchestrator {
     this.formatter = new ResponseFormatter();
     this.crisisDetector = crisisDetector;
     this.domainName = domainHandler.domainName;
+    this.domainHandler = domainHandler;
 
     // Register domain capabilities
     this.registry.registerDomain(domainHandler);
@@ -181,6 +186,11 @@ export class Orchestrator {
       }
 
       if (intent.action === 'system_help') {
+        // Si el dominio expone getHelpText (texto curado para usuario final)
+        // lo usamos. Si no, caemos al listado autogenerado de capabilities.
+        if (this.domainHandler.getHelpText) {
+          return this.respond(msg.chatId, this.domainHandler.getHelpText());
+        }
         return this.respond(msg.chatId, this.formatter.formatHelp(
           this.registry.getAllCapabilities(),
           this.domainName,
@@ -219,7 +229,12 @@ export class Orchestrator {
 
       // ── Step 4: Handle unknown intent ──────────────────────────────────
       if (intent.action === 'unknown') {
-        return this.respond(msg.chatId, this.formatter.formatUnknown());
+        // Si el dominio expone getFallbackMessage (texto que orienta al
+        // usuario hacia lo que sí entiende), lo usamos en vez del genérico.
+        const fallback = this.domainHandler.getFallbackMessage
+          ? this.domainHandler.getFallbackMessage()
+          : this.formatter.formatUnknown();
+        return this.respond(msg.chatId, fallback);
       }
 
       // ── Step 4.5: Check for incomplete input (pending_input) ───────────

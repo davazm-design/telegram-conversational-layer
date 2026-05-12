@@ -156,6 +156,20 @@ export interface IDomainHandler {
    * (the pre-filter exists to intercept user inputs, not outbound nudges).
    */
   tick?(send: (userId: string, text: string) => Promise<void>): Promise<void>;
+
+  /**
+   * Optional: Texto de /help curado por el dominio. Si está presente, el
+   * orquestador lo usa en lugar del listado autogenerado de capabilities
+   * (que mostraría nombres internos como "add_reminder").
+   */
+  getHelpText?(): string;
+
+  /**
+   * Optional: Mensaje del dominio cuando el router no resuelve la intención.
+   * Reemplaza al genérico "No entendí tu mensaje..." con uno que guíe al
+   * usuario hacia lo que sí entiende.
+   */
+  getFallbackMessage?(): string;
 }
 
 // ─── LLM Provider ────────────────────────────────────────────────────────────

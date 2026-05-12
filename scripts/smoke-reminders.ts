@@ -148,6 +148,27 @@ async function main() {
   await adapter.send('/recordatorios');
   log('USER: /recordatorios (final)', adapter.last());
 
+  // ── Fase 4 NL conversacional ────────────────────────────────────────────
+  adapter.reset();
+  await adapter.send('/help');
+  log('USER: /help (curado)', adapter.last());
+
+  adapter.reset();
+  await adapter.send('¿Qué puedes hacer?');
+  log('USER: ¿Qué puedes hacer?', adapter.last());
+
+  adapter.reset();
+  await adapter.send('¿Para qué me sirve cada comando?');
+  log('USER: ¿Para qué me sirve cada comando?', adapter.last());
+
+  adapter.reset();
+  await adapter.send('¿No dices que puedo escribir en lenguaje natural?');
+  log('USER: ¿No dices que puedo escribir en lenguaje natural?', adapter.last());
+
+  adapter.reset();
+  await adapter.send('asdfqwerzxcv');
+  log('USER: asdfqwerzxcv (fallback orientador)', adapter.last());
+
   // 12) Silencio + tick con vencido → no debe enviar
   adapter.reset();
   await adapter.send('/silencio 2h');
