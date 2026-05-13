@@ -466,6 +466,29 @@ describe('Fase 4 — Compás / ADHD Coach', () => {
     expect(adapter.last()).toMatch(/recordatorio guardado|listo/i);
   });
 
+  test('regresión: /recordatorio (singular) funciona como alias de /recordar', async () => {
+    // Confusión natural en producción: /recordar (verbo) vs /recordatorios
+    // (plural, ver lista) vs /recordatorio (singular). El singular antes
+    // caía a fallback.
+    await adapter.receive('/recordatorio mañana 9am llamar al doctor');
+    expect(adapter.last()).toMatch(/recordatorio guardado|listo/i);
+    expect(adapter.last()).toContain('Llamar al doctor');
+  });
+
+  test('regresión: /recordatorio para el X (con "para el") funciona', async () => {
+    // "/recordatorio PARA EL 22 de mayo 9am vacuna VSR" — el handler quita
+    // "para el" antes de pasar al parser de tiempo.
+    await adapter.receive('/recordatorio para el 22 de mayo 9am vacuna VSR');
+    expect(adapter.last()).toMatch(/recordatorio guardado|listo/i);
+    expect(adapter.last()).toMatch(/22\/05/);
+  });
+
+  test('regresión: /recordatorio sin args pide spec via pending_input', async () => {
+    await adapter.receive('/recordatorio');
+    expect(adapter.last()).toMatch(/cu[áa]l es|cu[áa]l|qu[eé]/i);
+    expect(adapter.last()).not.toMatch(/no entend/i);
+  });
+
   test('regresión: "ya fallé" → reencuadre, NO anti_abandono', async () => {
     // El contrato de Fase 4 mueve "ya fallé" a reencuadre (pensamiento
     // automático negativo, no decisión de abandonar). Antes "ya falle"

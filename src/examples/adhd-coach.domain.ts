@@ -1221,13 +1221,21 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
       },
 
       // ── Fase 3 — Recordatorios programados ───────────────────────────────
-      // /recordar con argumentos: captura todo lo que sigue como "spec"
+      // /recordar con argumentos: captura todo lo que sigue como "spec".
+      // Alias: /recordatorio (singular) — confusión natural con /recordar
+      // y /recordatorios; lo mapeamos al mismo flujo de crear. La frase
+      // "/recordatorio para el X" también funciona — la palabra "para"
+      // queda en el spec y el parser la maneja como parte del texto.
       {
-        patterns: [/^\/recordar(?:\s+(.+))?$/i],
+        patterns: [/^\/(recordar|recordatorio)(?:\s+(.+))?$/i],
         action: 'add_reminder',
         extractParams: (_match, _normalized, rawText) => {
-          const m = rawText.match(/^\/recordar\s*(.*)$/i);
-          return { spec: (m?.[1] ?? '').trim() };
+          const m = rawText.match(/^\/(?:recordar|recordatorio)\s*(.*)$/i);
+          // Si empieza con "para " (frase natural: "/recordatorio PARA el 22..."),
+          // lo quitamos para que el parser de tiempo arranque limpio.
+          let spec = (m?.[1] ?? '').trim();
+          spec = spec.replace(/^para\s+(el\s+)?/i, '');
+          return { spec };
         },
       },
       // NL: "recuérdame X" / "recuerdame X" → add_reminder con spec=X
