@@ -489,6 +489,38 @@ describe('Fase 4 — Compás / ADHD Coach', () => {
     expect(adapter.last()).not.toMatch(/no entend/i);
   });
 
+  test('regresión prod: tiempo trailing — "X en 16 minutos"', async () => {
+    // Caso real: el usuario escribió "Recuérdame cita con doctora Soto
+    // en 16 minutos" (tiempo AL FINAL). En español es natural y el bot
+    // antes caía a fallback. reorderTimeToFront lo arregla.
+    await adapter.receive('Recuérdame cita con doctora Soto en 16 minutos');
+    expect(adapter.last()).toMatch(/recordatorio guardado|listo/i);
+    expect(adapter.last().toLowerCase()).toContain('cita con doctora');
+  });
+
+  test('regresión prod: trailing "X mañana 9am"', async () => {
+    await adapter.receive('recuérdame llamar al doctor mañana 9am');
+    expect(adapter.last()).toMatch(/recordatorio guardado|listo/i);
+    expect(adapter.last().toLowerCase()).toContain('llamar al doctor');
+  });
+
+  test('regresión prod: trailing "X a las 8am"', async () => {
+    await adapter.receive('recuérdame tomar pastilla a las 8am');
+    expect(adapter.last()).toMatch(/recordatorio guardado/i);
+    expect(adapter.last()).toMatch(/08:00/);
+  });
+
+  test('regresión prod: trailing "X el viernes 10am"', async () => {
+    await adapter.receive('/recordar reunión con jefe el viernes 10am');
+    expect(adapter.last()).toMatch(/recordatorio guardado/i);
+  });
+
+  test('regresión: orden canónica (tiempo al inicio) sigue funcionando', async () => {
+    await adapter.receive('/recordar mañana 9am llamar al doctor');
+    expect(adapter.last()).toMatch(/recordatorio guardado/i);
+    expect(adapter.last().toLowerCase()).toContain('llamar al doctor');
+  });
+
   test('regresión: "ya fallé" → reencuadre, NO anti_abandono', async () => {
     // El contrato de Fase 4 mueve "ya fallé" a reencuadre (pensamiento
     // automático negativo, no decisión de abandonar). Antes "ya falle"

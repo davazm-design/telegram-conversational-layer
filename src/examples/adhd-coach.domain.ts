@@ -568,6 +568,39 @@ export function parseTimeForHint(input: string, hint: string, now: Date = new Da
   return null;
 }
 
+/**
+ * Si el usuario puso el tiempo AL FINAL ("cita con doctora en 16 minutos"),
+ * lo movemos AL INICIO para que parseReminderSpec lo entienda
+ * ("en 16 minutos cita con doctora"). Pasa el spec inmutable si ya empieza
+ * con tiempo o no se detecta tiempo trailing.
+ */
+export function reorderTimeToFront(spec: string): string {
+  if (!spec) return spec;
+  const trimmed = spec.trim();
+  // Si ya empieza con marcador de tiempo, no tocar. Tolerancia a ñ/tildes
+  // ([nñ], [áa], [íi], [eé]) porque el texto del usuario las conserva.
+  if (/^(en\s+\d+|hoy\b|ma[nñ]ana\b|pasado\s+ma[nñ]ana\b|a\s+las\s+\d|\d{1,2}[:\d]|\d{1,2}\s*(am|pm)|mediod[íi]a\b|medianoche\b|(?:el\s+)?(?:lunes|martes|mi[eé]rcoles|jueves|viernes|s[áa]bado|domingo)\b|\d{1,2}[/\-]\d{1,2}\b|\d{4}-\d{1,2}-\d{1,2}\b)/i.test(trimmed)) {
+    return trimmed;
+  }
+  // Patrones de tiempo al final del spec (en orden de especificidad).
+  // Todos con [nñ]/[áa]/[íi]/[eé] para tolerar acentos y ñ.
+  const trailingPatterns = [
+    // "...en 16 min", "...en 2 horas", "...en 1 semana"
+    /^(.+?)\s+(en\s+\d+\s*(?:seg(?:undos?)?|s|min(?:utos?)?|h|hora|horas|d|d[íi]a|d[íi]as|sem|semana|semanas)\b)\s*$/i,
+    // "...mañana", "...mañana 9am", "...hoy 18:00", "...pasado mañana 10am"
+    /^(.+?)\s+((?:pasado\s+ma[nñ]ana|ma[nñ]ana|hoy)(?:\s+(?:a\s+las\s+)?\d{1,2}(?::\d{2})?(?:\s*(?:am|pm))?)?)\s*$/i,
+    // "...a las 9am", "...a las 15:00"
+    /^(.+?)\s+(a\s+las\s+\d{1,2}(?::\d{2})?(?:\s*(?:am|pm))?)\s*$/i,
+    // "...el lunes 9am", "...el viernes"
+    /^(.+?)\s+(el\s+(?:lunes|martes|mi[eé]rcoles|jueves|viernes|s[áa]bado|domingo)(?:\s+(?:a\s+las\s+)?\d{1,2}(?::\d{2})?(?:\s*(?:am|pm))?)?)\s*$/i,
+  ];
+  for (const re of trailingPatterns) {
+    const m = trimmed.match(re);
+    if (m) return `${m[2]} ${m[1]}`.trim();
+  }
+  return trimmed;
+}
+
 function splitTaskDump(text: string): string[] {
   // Separadores en orden de prioridad:
   //   1. salto de línea (Enter en Telegram)
@@ -2101,8 +2134,8 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
   // ─── Fase 3: recordatorios programados ───────────────────────────────────
 
   private async addReminder(userId: string, params: Record<string, unknown>): Promise<ActionResult> {
-    const spec = String(params.spec ?? '').trim();
-    if (!spec) {
+    const rawSpec = String(params.spec ?? '').trim();
+    if (!rawSpec) {
       return {
         success: false,
         message:
@@ -2110,6 +2143,10 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
           '"/recordar mañana 9am llamar al doctor".',
       };
     }
+    // Tolerancia a tiempo al final: "cita con doctora en 16 minutos" →
+    // "en 16 minutos cita con doctora". Centralizado aquí para que aplique
+    // a todas las entradas (/recordar, recuérdame, agrega un recordatorio).
+    const spec = reorderTimeToFront(rawSpec);
     const parsed = parseReminderSpec(spec);
     if (!parsed.ok) {
       if (parsed.reason === 'tomorrow_needs_hour') {
