@@ -336,18 +336,19 @@ describe('/agenda — flujo conversacional refactorizado', () => {
   });
 
   test('4.1) render numerado: items multi-línea quedan en una sola línea', async () => {
-    // Defensa: si un item llega con \n internos por cualquier motivo, el
-    // render los aplana para que "— categoria" quede al lado del número.
-    await storage.adhdCoachStore.setPendingAgendaSelection(user, [
-      { text: 'línea 1\nlínea 2\nlínea 3', category: 'otros' },
-    ]);
-    // No invocamos via orchestrator (porque sobreescribiría); en su lugar
-    // recreamos la clasificación con un dump que provoque el caso.
+    // Con saltos de línea: el splitter prioriza \n sobre coma. Las comas
+    // dentro de un renglón son parte del texto del item, no separadores.
+    // Input: 2 líneas → 2 items. Cada uno renderizado en UNA línea.
     await adapter.receive('/agenda primer item, segundo item con\nsalto adentro, tercero');
     const r = adapter.last();
-    // El render NO debe tener "— otros" suelto al final de una línea sin número.
     const numLineas = r.split('\n').filter((l) => /^\d+\.\s/.test(l)).length;
-    expect(numLineas).toBeGreaterThanOrEqual(3);
+    expect(numLineas).toBe(2);
+    // Ningún item debe quedar partido en varias líneas con "— categoria"
+    // suelto: cada línea numerada termina con su categoría.
+    const itemLines = r.split('\n').filter((l) => /^\d+\.\s/.test(l));
+    for (const line of itemLines) {
+      expect(line).toMatch(/—\s+\w+\s*$/);
+    }
   });
 
   test('4.1) /borrar N elimina la micro-tarea', async () => {
@@ -432,6 +433,50 @@ describe('/agenda — flujo conversacional refactorizado', () => {
     adapter.reset();
     await adapter.receive('Elimina el punto 5');
     expect(adapter.last()).toMatch(/modo selecci[óo]n|no puedo reorganizar/i);
+  });
+
+  test('4.1) regresión prod: coma DENTRO de un renglón NO parte el item', async () => {
+    // Bug real: el usuario escribió 4 items con Enter, uno tenía coma
+    // interna ("Comprar bote antismalte, para quitar color de puerta")
+    // y el bot lo partió en 2. Ahora el splitter prioriza \n sobre coma.
+    const dump =
+      'comprar base para televisión\n' +
+      'Comprar bote antismalte, para quitar color de puerta\n' +
+      'Quitar molduras de puerta\n' +
+      'Ir a carpintería';
+    await adapter.receive(`/agenda ${dump}`);
+    const r = adapter.last();
+    const numLineas = r.split('\n').filter((l) => /^\d+\.\s/.test(l)).length;
+    expect(numLineas).toBe(4);
+    expect(r).toMatch(/Comprar bote antismalte, para quitar color de puerta/);
+  });
+
+  test('4.1) regresión prod: "agrega las N" como cuantificador → todos', async () => {
+    // Bug real: "Agrega las 5 como mantenimiento" se interpretaba como
+    // "índice 5", cargando solo el quinto item. Debe interpretarse como
+    // cuantificador "todas las N = todos".
+    await adapter.receive('/agenda A, B, C, D');
+    adapter.reset();
+    await adapter.receive('Agrega las 5 como mantenimiento');
+    expect(adapter.last()).toMatch(/Cargué a tu día/);
+    const tasks = await storage.adhdCoachStore.getMicroTasks(user);
+    expect(tasks.length).toBe(4);
+  });
+
+  test('4.1) "las 4" / "los 3" / "todas las 5" → todos', async () => {
+    await adapter.receive('/agenda A, B, C');
+    adapter.reset();
+    await adapter.receive('las 3');
+    expect(adapter.last()).toMatch(/Cargué a tu día/);
+    expect((await storage.adhdCoachStore.getMicroTasks(user)).length).toBe(3);
+  });
+
+  test('4.1) "agrega todas" → todos', async () => {
+    await adapter.receive('/agenda A, B');
+    adapter.reset();
+    await adapter.receive('agrega todas');
+    expect(adapter.last()).toMatch(/Cargué a tu día/);
+    expect((await storage.adhdCoachStore.getMicroTasks(user)).length).toBe(2);
   });
 
   test('4.1) reproducción del bug del usuario: volcado multi-línea limpio', async () => {

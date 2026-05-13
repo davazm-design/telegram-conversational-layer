@@ -602,15 +602,19 @@ export function reorderTimeToFront(spec: string): string {
 }
 
 function splitTaskDump(text: string): string[] {
-  // Separadores en orden de prioridad:
-  //   1. salto de línea (Enter en Telegram)
-  //   2. coma
-  //   3. " y " (conjunción) — SOLO si NO hay saltos de línea ni comas, para
-  //      no destruir frases como "Entre 22 y 23 de mayo" cuando el usuario
-  //      ya separó los items con Enter.
+  // Un solo separador a la vez, en orden de prioridad estricta:
+  //   1. salto de línea (Enter): si está presente, ES el separador. Las
+  //      comas dentro de un renglón son parte del texto del item, no nuevos.
+  //   2. coma: solo si NO hay saltos de línea.
+  //   3. " y ": solo si no hay ninguno de los anteriores.
+  // Esto evita romper items como "Comprar bote antismalte, para quitar
+  // color" cuando el usuario ya separó con Enter.
   const hasLines = /\r?\n/.test(text);
   const hasCommas = /,/.test(text);
-  const sep = hasLines || hasCommas ? /\r?\n|,/ : /\r?\n|,|\s+y\s+/i;
+  let sep: RegExp;
+  if (hasLines) sep = /\r?\n/;
+  else if (hasCommas) sep = /,/;
+  else sep = /\s+y\s+/i;
   return text
     .split(sep)
     .map((p) => p.trim())
@@ -653,6 +657,19 @@ export function parseAgendaSelection(
 
   // 3) "Todos" / "todo" / "todas".
   if (/^(todos|todo|todas|todas las anteriores|todos los anteriores)\b/.test(norm)) {
+    return { kind: 'indices', indices: candidates.map((_, i) => i) };
+  }
+  // 3b) Cuantificador: "(agrega|carga|guarda|mete|pon|añade)? (todas?)? (las|los) [N]?"
+  //     → tratar como "todos". Cubre:
+  //       "las 5", "agrega las 5 como mantenimiento", "los 4 a mi día",
+  //       "todas las 5", "todos los 4", "agrega todas".
+  //     Permisivo con N: si dice "las 5" y hay 4 items, asume que quiso
+  //     todos (es mucho más probable que un error de conteo que una
+  //     selección de slice tipo "los 5 primeros").
+  if (/^(?:(?:agrega|carga|guarda|mete|pon|anade)\s+)?(?:tod(?:as|os)\s+)?(?:las|los)(?:\s+\d{1,3})?\b/.test(norm)) {
+    return { kind: 'indices', indices: candidates.map((_, i) => i) };
+  }
+  if (/^(?:agrega|carga|guarda|mete|pon|anade)\s+tod(?:as|os)\b/.test(norm)) {
     return { kind: 'indices', indices: candidates.map((_, i) => i) };
   }
 
