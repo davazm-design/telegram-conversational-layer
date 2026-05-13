@@ -149,6 +149,66 @@ const cases: Case[] = [
     expectAny: [/neurociencia.*espiritualidad.*ambos|neurociencia.*fe.*ambos/i],
   },
 
+  // ── Fase 4.1 — refinamiento de /agenda ──────────────────────────────
+  // Reproducción del bug del usuario: volcado multi-línea limpio.
+  {
+    group: 'fase4.1',
+    input: '/agenda El 2 de junio deja la aspirina Ale.\nVacuna VSR EN LA semana 32-34\nEntre 22 y 23 de mayo estudio de sangre',
+    expectAny: [/Lo separé así/],
+    forbid: [FALLBACK_RE],
+  },
+  // /borrar y /editar
+  {
+    group: 'fase4.1',
+    input: '/borrar 1',
+    setup: ['/agenda A, B, C', 'todos'],
+    expectAny: [/Borrada/i],
+  },
+  {
+    group: 'fase4.1',
+    input: '/editar 1 nuevo texto del día',
+    setup: ['/agenda A, B, C', 'todos'],
+    expectAny: [/Cambiada #1/i],
+  },
+  {
+    group: 'fase4.1',
+    input: 'elimina el punto 2',
+    setup: ['/agenda A, B, C', 'todos'],
+    expectAny: [/Borrada/i],
+  },
+  {
+    group: 'fase4.1',
+    input: 'borra el 1',
+    setup: ['/agenda A, B, C', 'todos'],
+    expectAny: [/Borrada/i],
+  },
+  {
+    group: 'fase4.1',
+    input: 'edita el punto 1: llamar al doctor',
+    setup: ['/agenda A, B, C', 'todos'],
+    expectAny: [/Cambiada #1/i],
+  },
+  // /agenda con micro-tareas existentes
+  {
+    group: 'fase4.1',
+    input: '/agenda',
+    setup: ['/agenda A, B, C', 'todos'],
+    expectAny: [/Tienes ya \d+ micro-tarea/i],
+  },
+  // Detector de imperativo en selección
+  {
+    group: 'fase4.1',
+    input: 'Separa lo de A de lo de B',
+    setup: ['/agenda A, B, C'],
+    expectAny: [/modo selecci[óo]n|no puedo reorganizar/i],
+  },
+  {
+    group: 'fase4.1',
+    input: 'Elimina el punto 5',
+    setup: ['/agenda A, B, C'],
+    expectAny: [/modo selecci[óo]n|no puedo reorganizar/i],
+  },
+
   // ── Flujos multi-paso (un follow-up cada uno) ──────────────────────
   {
     group: 'flujo',

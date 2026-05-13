@@ -318,4 +318,135 @@ describe('/agenda — flujo conversacional refactorizado', () => {
     expect(r.success).toBe(false);
     expect(r.message).toMatch(/no tengo una selección|empieza con \/agenda/i);
   });
+
+  // ─── Fase 4.1: refinamiento ────────────────────────────────────────────
+
+  test('4.1) splitter acepta saltos de línea como separadores', async () => {
+    // Antes: todo el volcado caía como UN solo item porque solo se splitteaba
+    // por "," o " y ". El usuario en Telegram presiona Enter para separar.
+    const dump = 'comprar pan\nllamar al doctor\nentregar reporte';
+    await adapter.receive(`/agenda ${dump}`);
+    const r = adapter.last();
+    expect(r).toContain('Lo separé así');
+    expect(r).toMatch(/comprar pan/i);
+    expect(r).toMatch(/llamar al doctor/i);
+    expect(r).toMatch(/entregar reporte/i);
+    const cand = await storage.adhdCoachStore.getPendingAgendaSelection(user);
+    expect(cand!.length).toBe(3);
+  });
+
+  test('4.1) render numerado: items multi-línea quedan en una sola línea', async () => {
+    // Defensa: si un item llega con \n internos por cualquier motivo, el
+    // render los aplana para que "— categoria" quede al lado del número.
+    await storage.adhdCoachStore.setPendingAgendaSelection(user, [
+      { text: 'línea 1\nlínea 2\nlínea 3', category: 'otros' },
+    ]);
+    // No invocamos via orchestrator (porque sobreescribiría); en su lugar
+    // recreamos la clasificación con un dump que provoque el caso.
+    await adapter.receive('/agenda primer item, segundo item con\nsalto adentro, tercero');
+    const r = adapter.last();
+    // El render NO debe tener "— otros" suelto al final de una línea sin número.
+    const numLineas = r.split('\n').filter((l) => /^\d+\.\s/.test(l)).length;
+    expect(numLineas).toBeGreaterThanOrEqual(3);
+  });
+
+  test('4.1) /borrar N elimina la micro-tarea', async () => {
+    await storage.adhdCoachStore.addMicroTask(user, 'tarea A');
+    await storage.adhdCoachStore.addMicroTask(user, 'tarea B');
+    await storage.adhdCoachStore.addMicroTask(user, 'tarea C');
+    adapter.reset();
+    await adapter.receive('/borrar 2');
+    expect(adapter.last()).toMatch(/Borrada.*tarea B/);
+    const tasks = await storage.adhdCoachStore.getMicroTasks(user);
+    expect(tasks.length).toBe(2);
+    expect(tasks.map((t) => t.text)).toEqual(['tarea A', 'tarea C']);
+  });
+
+  test('4.1) "elimina el punto N" NL también borra', async () => {
+    await storage.adhdCoachStore.addMicroTask(user, 'tarea A');
+    await storage.adhdCoachStore.addMicroTask(user, 'tarea B');
+    adapter.reset();
+    await adapter.receive('elimina el punto 1');
+    expect(adapter.last()).toMatch(/Borrada.*tarea A/);
+  });
+
+  test('4.1) "borra el 1" también borra', async () => {
+    await storage.adhdCoachStore.addMicroTask(user, 'X');
+    adapter.reset();
+    await adapter.receive('borra el 1');
+    expect(adapter.last()).toMatch(/Borrada/);
+  });
+
+  test('4.1) /editar N reemplaza el texto', async () => {
+    await storage.adhdCoachStore.addMicroTask(user, 'viejo texto');
+    adapter.reset();
+    await adapter.receive('/editar 1 nuevo texto del día');
+    expect(adapter.last()).toMatch(/Cambiada #1.*viejo texto.*nuevo texto del día/);
+    const tasks = await storage.adhdCoachStore.getMicroTasks(user);
+    expect(tasks[0].text).toBe('nuevo texto del día');
+  });
+
+  test('4.1) "edita el punto 1: <texto>" NL también edita', async () => {
+    await storage.adhdCoachStore.addMicroTask(user, 'algo');
+    adapter.reset();
+    await adapter.receive('edita el punto 1: llamar al doctor');
+    expect(adapter.last()).toMatch(/Cambiada #1/);
+    const tasks = await storage.adhdCoachStore.getMicroTasks(user);
+    expect(tasks[0].text).toBe('llamar al doctor');
+  });
+
+  test('4.1) /agenda con micro-tareas existentes menciona el contexto', async () => {
+    await storage.adhdCoachStore.addMicroTask(user, 'existente A');
+    await storage.adhdCoachStore.addMicroTask(user, 'existente B');
+    adapter.reset();
+    await adapter.receive('/agenda');
+    const r = adapter.last();
+    expect(r).toMatch(/Tienes ya 2 micro-tarea/);
+    expect(r).toMatch(/te las agrego|sumando|agrego/i);
+  });
+
+  test('4.1) /agenda sin micro-tareas usa el mensaje original', async () => {
+    await adapter.receive('/agenda');
+    expect(adapter.last()).toMatch(/Vamos a ordenar el día/);
+    expect(adapter.last()).not.toMatch(/Tienes ya/);
+  });
+
+  test('4.1) detector de imperativo: "Separa lo de X de Y" en selección → aclara', async () => {
+    await adapter.receive('/agenda terminar LABDEN, limpiar jardín, hacer devocional');
+    adapter.reset();
+    await adapter.receive('Separa lo de terminar de lo de limpiar');
+    const r = adapter.last();
+    expect(r).toMatch(/modo selecci[óo]n|no puedo reorganizar/i);
+    expect(r).toMatch(/n[úu]meros|todos|despu[ée]s/i);
+    // Nada cargado todavía
+    const tasks = await storage.adhdCoachStore.getMicroTasks(user);
+    expect(tasks.length).toBe(0);
+    // pending_input preservado
+    const pi = await storage.sessionStore.getPendingInput(user);
+    expect(pi).not.toBeNull();
+    expect(pi!.action).toBe('agenda_confirm_selection');
+  });
+
+  test('4.1) "Elimina el punto 5" durante selección → aclara, no clasifica como dump', async () => {
+    await adapter.receive('/agenda A, B, C');
+    adapter.reset();
+    await adapter.receive('Elimina el punto 5');
+    expect(adapter.last()).toMatch(/modo selecci[óo]n|no puedo reorganizar/i);
+  });
+
+  test('4.1) reproducción del bug del usuario: volcado multi-línea limpio', async () => {
+    // Escenario exacto del screenshot del usuario.
+    const dump =
+      'El 2 de junio deja la aspirina Ale.\n' +
+      'Vacuna VSR EN LA semana 32-34\n' +
+      'Entre 22 y 23 de mayo estudio de sangre';
+    await adapter.receive(`/agenda ${dump}`);
+    const r = adapter.last();
+    // Debe tener 3 items separados (no un blob).
+    const numLines = r.split('\n').filter((l) => /^\d+\.\s/.test(l)).length;
+    expect(numLines).toBe(3);
+    // Y ningún item contiene "Entre 22\n" pegado a otra cosa.
+    expect(r).toMatch(/1\..*aspirina/i);
+    expect(r).toMatch(/Vacuna VSR/i);
+  });
 });

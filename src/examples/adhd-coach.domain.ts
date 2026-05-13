@@ -542,8 +542,17 @@ export function parseTimeForHint(input: string, hint: string, now: Date = new Da
 }
 
 function splitTaskDump(text: string): string[] {
+  // Separadores en orden de prioridad:
+  //   1. salto de línea (Enter en Telegram)
+  //   2. coma
+  //   3. " y " (conjunción) — SOLO si NO hay saltos de línea ni comas, para
+  //      no destruir frases como "Entre 22 y 23 de mayo" cuando el usuario
+  //      ya separó los items con Enter.
+  const hasLines = /\r?\n/.test(text);
+  const hasCommas = /,/.test(text);
+  const sep = hasLines || hasCommas ? /\r?\n|,/ : /\r?\n|,|\s+y\s+/i;
   return text
-    .split(/,|\s+y\s+/i)
+    .split(sep)
     .map((p) => p.trim())
     .filter((p) => p.length > 0);
 }
@@ -773,6 +782,25 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
         description: 'Marca una micro-tarea como hecha',
         parameters: {
           taskId: { type: 'string', description: 'Número o ID de la micro-tarea', required: true },
+        },
+        riskLevel: RiskLevel.LOW_RISK_WRITE,
+        requiresConfirmation: false,
+      },
+      {
+        name: 'delete_micro_task',
+        description: 'Borra una micro-tarea por número',
+        parameters: {
+          index: { type: 'string', description: 'Número (1, 2, …)', required: true },
+        },
+        riskLevel: RiskLevel.LOW_RISK_WRITE,
+        requiresConfirmation: false,
+      },
+      {
+        name: 'edit_micro_task',
+        description: 'Edita el texto de una micro-tarea por número',
+        parameters: {
+          index: { type: 'string', description: 'Número (1, 2, …)', required: true },
+          text: { type: 'string', description: 'Nuevo texto', required: true },
         },
         riskLevel: RiskLevel.LOW_RISK_WRITE,
         requiresConfirmation: false,
@@ -1051,6 +1079,10 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
       '/oracion': 'christian_prayer',
       '/devocional': 'christian_devotional',
       '/espiritual': 'spiritual_mode',
+      // Fase 4.1: edición de micro-tareas (con args via reglas también)
+      // /borrar N y /editar N <texto> se manejan via reglas; no mapeamos aquí
+      // porque admiten argumentos. Si el usuario teclea /borrar solo, cae
+      // a fallback orientador.
       // NOTA: /silencio, /recordar y /cancelar_recordatorio NO se mapean aquí
       // porque sus rules capturan argumentos del usuario.
     };
@@ -1151,11 +1183,14 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
         action: 'agenda_start',
       },
       // /agenda <texto> → clasificar directo (atajo)
+      // Usa [\s\S]+ para que el dump pueda incluir saltos de línea (Enter
+      // en Telegram). Antes "." no incluía \n y la regla fallaba con dumps
+      // multi-línea.
       {
-        patterns: [/^\/agenda\s+(.+)$/i],
+        patterns: [/^\/agenda\s+([\s\S]+)$/i],
         action: 'agenda_classify',
         extractParams: (_match, _normalized, rawText) => {
-          const m = rawText.match(/^\/agenda\s+(.+)$/i);
+          const m = rawText.match(/^\/agenda\s+([\s\S]+)$/i);
           return { dump: (m?.[1] ?? '').trim() };
         },
       },
@@ -1318,6 +1353,50 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
         action: 'procrastination_decode',
       },
 
+      // ── Fase 4.1 — edición/borrado granular de micro-tareas ──────────────
+      // /borrar N
+      {
+        patterns: [/^\/borrar\s+(\d+)$/i],
+        action: 'delete_micro_task',
+        extractParams: (match) => ({ index: match[1] }),
+      },
+      // /editar N <texto>
+      {
+        patterns: [/^\/editar\s+(\d+)\s+(.+)$/i],
+        action: 'edit_micro_task',
+        extractParams: (_match, _normalized, rawText) => {
+          const m = rawText.match(/^\/editar\s+(\d+)\s+(.+)$/i);
+          return { index: m?.[1] ?? '', text: (m?.[2] ?? '').trim() };
+        },
+      },
+      // NL: "elimina/borra (el)? (punto|item|numero)? N"
+      // Permite "el" y el sustantivo independientes: "borra el 1",
+      // "elimina punto 3", "borra el punto 5", "quita 2" — todo OK.
+      {
+        patterns: [/^(?:elimina|borra|quita)\s+(?:el\s+)?(?:(?:punto|item|numero|n[úu]mero)\s+)?(\d+)$/i],
+        action: 'delete_micro_task',
+        extractParams: (match) => ({ index: match[1] }),
+      },
+      // NL: "edita (el (punto|item|numero))? N: <texto>" o "cambia el N a <texto>"
+      {
+        patterns: [
+          /^(?:edita|edita el|cambia|reemplaza)\s+(?:(?:el\s+)?(?:punto|item|numero|n[úu]mero)\s+)?(\d+)\s*[:,]\s*(.+)$/i,
+          /^(?:cambia|reemplaza)\s+(?:el\s+)?(?:punto|item|numero|n[úu]mero)?\s*(\d+)\s+(?:a|por)\s+(.+)$/i,
+        ],
+        action: 'edit_micro_task',
+        extractParams: (match, _normalized, rawText) => {
+          // Re-aplicar contra rawText para preservar mayúsculas/acentos del texto.
+          for (const re of [
+            /^(?:edita|edita el|cambia|reemplaza)\s+(?:(?:el\s+)?(?:punto|item|numero|n[úu]mero)\s+)?(\d+)\s*[:,]\s*(.+)$/i,
+            /^(?:cambia|reemplaza)\s+(?:el\s+)?(?:punto|item|numero|n[úu]mero)?\s*(\d+)\s+(?:a|por)\s+(.+)$/i,
+          ]) {
+            const m = rawText.match(re);
+            if (m) return { index: m[1], text: m[2].trim() };
+          }
+          return { index: match[1], text: match[2].trim() };
+        },
+      },
+
       // ── Fase 4C — Reencuadre NL (frases automáticas comunes) ─────────────
       // NOTA: estos triggers son específicos para pensamientos rumiantes que
       // NO son crisis (crisis pre-filter ya intercepta antes).
@@ -1345,6 +1424,10 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
         return await this.startFocusSession(userId, params);
       case 'complete_micro_task':
         return await this.completeMicroTask(userId, params);
+      case 'delete_micro_task':
+        return await this.deleteMicroTask(userId, params);
+      case 'edit_micro_task':
+        return await this.editMicroTask(userId, params);
       case 'reset_day':
         return await this.resetDay(userId);
       // ── Fase 2 ──
@@ -1359,7 +1442,7 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
       case 'restart_no_guilt':
         return this.restartNoGuilt();
       case 'agenda_start':
-        return this.agendaStart();
+        return await this.agendaStart(userId);
       case 'agenda_classify':
         return await this.agendaClassify(userId, params);
       case 'agenda_confirm_selection':
@@ -1557,6 +1640,38 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
     return { success: true, message: `🗑️ ${count} micro-tarea(s) eliminada(s). Sesión de foco reiniciada. Día limpio. 🧘` };
   }
 
+  private async deleteMicroTask(userId: string, params: Record<string, unknown>): Promise<ActionResult> {
+    const idx = parseInt(String(params.index ?? ''), 10);
+    if (!Number.isFinite(idx) || idx < 1) {
+      return { success: false, message: '⚠️ Necesito un número. Ej: /borrar 3. Mira la lista con /focus.' };
+    }
+    const removed = await this.store.deleteMicroTaskByIndex(userId, idx);
+    if (!removed) {
+      return { success: false, message: `⚠️ No encontré la micro-tarea #${idx}. Revisa /focus.` };
+    }
+    return { success: true, message: `🗑️ Borrada: "${escapeMdV1(removed)}".` };
+  }
+
+  private async editMicroTask(userId: string, params: Record<string, unknown>): Promise<ActionResult> {
+    const idx = parseInt(String(params.index ?? ''), 10);
+    const newText = String(params.text ?? '').trim();
+    if (!Number.isFinite(idx) || idx < 1) {
+      return { success: false, message: '⚠️ Necesito un número. Ej: /editar 3 nuevo texto.' };
+    }
+    if (!newText) {
+      return { success: false, message: '⚠️ Necesito el nuevo texto. Ej: /editar 3 llamar al doctor.' };
+    }
+    const flatten = newText.replace(/[\r\n]+/g, ' ').replace(/\s{2,}/g, ' ').trim();
+    const oldText = await this.store.editMicroTaskByIndex(userId, idx, flatten);
+    if (oldText === null) {
+      return { success: false, message: `⚠️ No encontré la micro-tarea #${idx}. Revisa /focus.` };
+    }
+    return {
+      success: true,
+      message: `✏️ Cambiada #${idx}: "${escapeMdV1(oldText)}" → "${escapeMdV1(flatten)}".`,
+    };
+  }
+
   // ─── Fase 2: nuevas acciones ────────────────────────────────────────────
 
   private async setSilence(userId: string, params: Record<string, unknown>): Promise<ActionResult> {
@@ -1659,13 +1774,23 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
   // ─── /agenda (refactor Fase 3): flujo conversacional 4 pasos ────────────
   // Ver docs/agenda-contract.md para el diseño completo.
 
-  private agendaStart(): ActionResult {
+  private async agendaStart(userId: string): Promise<ActionResult> {
+    // Consciente del estado: si ya hay micro-tareas activas, lo decimos
+    // para que el usuario sepa que el nuevo volcado se SUMA, no reemplaza.
+    const tasks = await this.store.getMicroTasks(userId);
+    const pending = tasks.filter((t) => !t.completed).length;
+    const intro =
+      pending > 0
+        ? `Tienes ya ${pending} micro-tarea(s) en tu día. Si vuelcas más, te las agrego. ` +
+          'Si quieres ver lo que tienes, escribe /focus. Si quieres limpiar y empezar de cero, ' +
+          'usa /reinicio o "borrar todo".\n\n' +
+          'Vuélcame lo nuevo en bruto y yo lo separo en laboral, personal, mantenimiento, ' +
+          'espiritual y otros.'
+        : 'Vamos a ordenar el día. Vuélcame lo que tienes en bruto; yo lo separo ' +
+          'en laboral, personal, mantenimiento, espiritual y otros.';
     return {
       success: true,
-      message:
-        'Vamos a ordenar el día. Vuélcame lo que tienes en bruto; yo lo separo ' +
-        'en laboral, personal, mantenimiento, espiritual y otros.',
-      // Paso 1 → 2: el SIGUIENTE mensaje del usuario se trata como volcado.
+      message: intro,
       pendingInput: {
         action: 'agenda_classify',
         paramName: 'dump',
@@ -1697,10 +1822,13 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
     );
 
     // Render: lista numerada con su categoría. Markdown-safe (texto del usuario
-    // escapado para que un "_" no rompa el render de Telegram).
+    // escapado para que un "_" no rompa el render de Telegram). Defensivo
+    // contra saltos de línea internos (el render se rompía visualmente:
+    // "— categoria" terminaba al final de la última línea, no del número).
     const lines: string[] = ['Lo separé así:'];
     classified.forEach((c, i) => {
-      const safe = escapeMdV1(c.text);
+      const oneLine = c.text.replace(/[\r\n]+/g, ' ').replace(/\s{2,}/g, ' ').trim();
+      const safe = escapeMdV1(oneLine);
       lines.push(`${i + 1}. ${safe} — ${c.category}`);
     });
     lines.push('');
@@ -1735,6 +1863,28 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
         message:
           'ℹ️ No tengo una selección de agenda pendiente. Empieza con /agenda ' +
           'para volcar tu día.',
+      };
+    }
+
+    // Detector de imperativo: si el usuario empieza con un verbo de edición
+    // ("separa", "edita", "elimina", "borra", "divide", "junta"), claramente
+    // quería REORGANIZAR, no SELECCIONAR. Antes el bot matcheaba por substring
+    // y elegía silenciosamente. Ahora aclaramos el modo y preservamos
+    // pending_input para que el usuario reintente con selección real.
+    const imperative = /^\s*(separa|edita|elimina|borra|divide|junta|cambia|reemplaza|quita)\b/i;
+    if (imperative.test(selection)) {
+      return {
+        success: false,
+        message:
+          'Estoy en modo selección: aquí elijo cuáles items del volcado guardar, ' +
+          'pero no puedo reorganizarlos. Responde con números (ej: "1, 3"), con "todos", ' +
+          'con los textos, o "ninguno". Después de guardar puedes editar con ' +
+          '"/borrar N" o "/editar N nuevo texto".',
+        pendingInput: {
+          action: 'agenda_confirm_selection',
+          paramName: 'selection',
+          prompt: '¿Cuáles eliges?',
+        },
       };
     }
 
@@ -1781,8 +1931,11 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
       };
     }
 
-    // Guardar como microtasks. Mismo modelo existente; sin schema change.
-    const chosen = indices.map((i) => candidates[i].text);
+    // Guardar como microtasks. Aplanamos saltos de línea para que el item
+    // quede legible en /focus.
+    const chosen = indices.map((i) =>
+      candidates[i].text.replace(/[\r\n]+/g, ' ').replace(/\s{2,}/g, ' ').trim(),
+    );
     for (const text of chosen) {
       await this.store.addMicroTask(userId, text);
     }
@@ -2050,6 +2203,8 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
       '/recursos — líneas de apoyo.',
       '/checkin — registrar cómo vas.',
       '/focus — ver foco y microtareas.',
+      '/borrar N — borrar la micro-tarea número N.',
+      '/editar N nuevo texto — cambiar la micro-tarea N.',
       '',
       'Regulación y procrastinación:',
       '/reset90 — regularte cuando estás saturado.',

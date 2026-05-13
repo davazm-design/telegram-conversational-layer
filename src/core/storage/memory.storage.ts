@@ -101,6 +101,25 @@ class MemoryAdhdCoachStore implements IAdhdCoachStore {
     return false;
   }
 
+  async deleteMicroTaskByIndex(userId: string, index1Based: number): Promise<string | null> {
+    const k = this.key(userId);
+    const list = this.microTasks.get(k) ?? [];
+    if (index1Based < 1 || index1Based > list.length) return null;
+    const removed = list.splice(index1Based - 1, 1)[0];
+    this.microTasks.set(k, list);
+    return removed?.text ?? null;
+  }
+
+  async editMicroTaskByIndex(userId: string, index1Based: number, newText: string): Promise<string | null> {
+    const k = this.key(userId);
+    const list = this.microTasks.get(k) ?? [];
+    if (index1Based < 1 || index1Based > list.length) return null;
+    const oldText = list[index1Based - 1].text;
+    list[index1Based - 1].text = newText;
+    this.microTasks.set(k, list);
+    return oldText;
+  }
+
   async getFocusSessions(userId: string) { return this.focusSessions.get(this.key(userId)) ?? []; }
   async addFocusSession(userId: string, task: string) {
     const list = await this.getFocusSessions(userId);

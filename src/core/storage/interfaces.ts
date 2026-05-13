@@ -27,6 +27,10 @@ export interface IAdhdCoachStore {
   getMicroTasks(userId: string): Promise<{ id: string; text: string; completed: boolean }[]>;
   addMicroTask(userId: string, text: string): Promise<void>;
   completeMicroTask(userId: string, taskId: string): Promise<boolean>;
+  /** Borra una micro-task por índice 1-based (sobre la lista que ve el usuario). */
+  deleteMicroTaskByIndex(userId: string, index1Based: number): Promise<string | null>;
+  /** Edita el texto de una micro-task por índice 1-based. Devuelve el texto anterior. */
+  editMicroTaskByIndex(userId: string, index1Based: number, newText: string): Promise<string | null>;
 
   getFocusSessions(userId: string): Promise<{ task: string; completed: boolean }[]>;
   addFocusSession(userId: string, task: string): Promise<void>;

@@ -93,6 +93,29 @@ class PostgresAdhdCoachStore implements IAdhdCoachStore {
     return true;
   }
 
+  async deleteMicroTaskByIndex(userId: string, index1Based: number): Promise<string | null> {
+    const tasks = await this.getMicroTasks(userId);
+    if (index1Based < 1 || index1Based > tasks.length) return null;
+    const target = tasks[index1Based - 1];
+    await this.pool.query(
+      'DELETE FROM adhd_items WHERE id = $1 AND domain_id = $2',
+      [(target as { dbId: number }).dbId, this.domainId],
+    );
+    return target.text;
+  }
+
+  async editMicroTaskByIndex(userId: string, index1Based: number, newText: string): Promise<string | null> {
+    const tasks = await this.getMicroTasks(userId);
+    if (index1Based < 1 || index1Based > tasks.length) return null;
+    const target = tasks[index1Based - 1];
+    const oldText = target.text;
+    await this.pool.query(
+      'UPDATE adhd_items SET text = $1 WHERE id = $2 AND domain_id = $3',
+      [newText, (target as { dbId: number }).dbId, this.domainId],
+    );
+    return oldText;
+  }
+
   async getFocusSessions(userId: string) {
     const res = await this.pool.query('SELECT text as task, completed FROM adhd_items WHERE domain_id = $1 AND user_id = $2 AND type = $3 ORDER BY created_at ASC', [this.domainId, userId, 'focus']);
     return res.rows;
