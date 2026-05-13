@@ -1416,18 +1416,23 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
           return { spec: '' };
         },
       },
-      // /cancelar_recordatorio N
+      // /cancelar_recordatorio N (o lista: "1, 2 y 4"). Tolerante a:
+      //   - espacios alrededor del "_": "/cancelar _ recordatorio 3"
+      //   - sin slash inicial: "cancelar recordatorio 3"
+      //   - múltiples índices: "1, 2 y 4" / "1,2,4" / "1 2 4"
       {
-        patterns: [/^\/cancelar_recordatorio\s+(\d+)$/i],
+        patterns: [
+          /^\/?cancelar[\s_]+recordatorio[\s_]*\s*(\d+(?:[,\s]+(?:y\s+)?\d+)*)\s*$/i,
+        ],
         action: 'cancel_reminder',
         extractParams: (match) => ({ index: match[1] }),
       },
-      // NL: "(cancela|borra|elimina|quita) (el)? recordatorio N"
-      // Importante: pide explícitamente la palabra "recordatorio" para no
-      // chocar con /borrar N (microtasks).
+      // NL: "(cancela|borra|elimina|quita) (el|los|las)? recordatorio(s)? <lista>"
+      // Importante: requiere la palabra "recordatorio(s)" para no chocar con
+      // /borrar N (microtasks).
       {
         patterns: [
-          /^(?:cancela|cancelar|borra|borrar|elimina|eliminar|quita|quitar)\s+(?:el\s+)?recordatorio\s+(\d+)$/i,
+          /^(?:cancela|cancelar|borra|borrar|elimina|eliminar|quita|quitar)\s+(?:(?:el|los|las)\s+)?recordatorios?\s+(\d+(?:[,\s]+(?:y\s+)?\d+)*)\s*$/i,
         ],
         action: 'cancel_reminder',
         extractParams: (match) => ({ index: match[1] }),
@@ -1546,9 +1551,9 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
       },
 
       // ── Fase 4.1 — edición/borrado granular de micro-tareas ──────────────
-      // /borrar N
+      // /borrar N (o lista "1, 2 y 4")
       {
-        patterns: [/^\/borrar\s+(\d+)$/i],
+        patterns: [/^\/borrar\s+(\d+(?:[,\s]+(?:y\s+)?\d+)*)\s*$/i],
         action: 'delete_micro_task',
         extractParams: (match) => ({ index: match[1] }),
       },
@@ -1561,11 +1566,14 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
           return { index: m?.[1] ?? '', text: (m?.[2] ?? '').trim() };
         },
       },
-      // NL: "elimina/borra (el|la)? (punto|item|numero|tarea|microtarea)? N"
+      // NL: "elimina/borra (el|la)? (punto|item|numero|tarea|microtarea)? N(,M,...)"
       // Permite artículo el/la y sustantivo independientes. NO captura
       // "recordatorio" porque eso es cancel_reminder (regla separada).
+      // Soporta lista: "borra 1, 2 y 4", "elimina las tareas 1, 3".
       {
-        patterns: [/^(?:elimina|borra|quita)\s+(?:(?:el|la)\s+)?(?:(?:punto|item|numero|n[úu]mero|tarea|microtarea|micro)\s+)?(\d+)$/i],
+        patterns: [
+          /^(?:elimina|borra|quita)\s+(?:(?:el|la|los|las)\s+)?(?:(?:punto|item|numero|n[úu]mero|tarea|tareas|microtarea|microtareas|micro)\s+)?(\d+(?:[,\s]+(?:y\s+)?\d+)*)\s*$/i,
+        ],
         action: 'delete_micro_task',
         extractParams: (match) => ({ index: match[1] }),
       },
@@ -1888,15 +1896,52 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
   }
 
   private async deleteMicroTask(userId: string, params: Record<string, unknown>): Promise<ActionResult> {
-    const idx = parseInt(String(params.index ?? ''), 10);
-    if (!Number.isFinite(idx) || idx < 1) {
-      return { success: false, message: '⚠️ Necesito un número. Ej: /borrar 3. Mira la lista con /focus.' };
+    const raw = String(params.index ?? '').trim();
+    if (!raw) {
+      return { success: false, message: '⚠️ Necesito uno o más números. Ej: /borrar 3 o /borrar 1, 2, 4. Mira la lista con /focus.' };
     }
-    const removed = await this.store.deleteMicroTaskByIndex(userId, idx);
-    if (!removed) {
-      return { success: false, message: `⚠️ No encontré la micro-tarea #${idx}. Revisa /focus.` };
+    const indices = raw
+      .split(/[,\s]+|\s+y\s+/i)
+      .map((s) => parseInt(s, 10))
+      .filter((n) => Number.isFinite(n) && n >= 1);
+    if (indices.length === 0) {
+      return { success: false, message: '⚠️ No encontré números válidos. Ej: /borrar 1, 2, 4.' };
     }
-    return { success: true, message: `🗑️ Borrada: "${escapeMdV1(removed)}".` };
+    // CRÍTICO: borrar de mayor a menor para que los índices restantes no
+    // cambien durante la operación.
+    const sorted = Array.from(new Set(indices)).sort((a, b) => b - a);
+    const removed: string[] = [];
+    const notFound: number[] = [];
+    for (const i of sorted) {
+      const text = await this.store.deleteMicroTaskByIndex(userId, i);
+      if (text) removed.unshift(text);
+      else notFound.push(i);
+    }
+    if (removed.length === 0) {
+      // Heurística amable: si no hay microtasks pero SÍ recordatorios,
+      // probablemente el usuario quería /cancelar_recordatorio.
+      const allMicroTasks = await this.store.getMicroTasks(userId);
+      const reminders = await this.store.listReminders(userId);
+      const baseMsg = `⚠️ No encontré las micro-tareas: ${notFound.sort((a, b) => a - b).join(', ')}. Revisa /focus.`;
+      if (allMicroTasks.length === 0 && reminders.length > 0) {
+        const list = notFound.sort((a, b) => a - b).join(', ');
+        return {
+          success: false,
+          message:
+            '⚠️ No tienes micro-tareas para borrar. ' +
+            `¿Querías cancelar recordatorios? Prueba: "cancela los recordatorios ${list}".`,
+        };
+      }
+      return { success: false, message: baseMsg };
+    }
+    const escaped = removed.map((t) => `"${escapeMdV1(t)}"`).join(', ');
+    let msg = removed.length === 1
+      ? `🗑️ Borrada: ${escaped}.`
+      : `🗑️ Borradas (${removed.length}): ${escaped}.`;
+    if (notFound.length > 0) {
+      msg += `\n⚠️ No encontré: ${notFound.sort((a, b) => a - b).join(', ')}.`;
+    }
+    return { success: true, message: msg };
   }
 
   private async editMicroTask(userId: string, params: Record<string, unknown>): Promise<ActionResult> {
@@ -2311,23 +2356,51 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
   }
 
   private async cancelReminder(userId: string, params: Record<string, unknown>): Promise<ActionResult> {
-    const idxRaw = String(params.index ?? '').trim();
-    const idx = parseInt(idxRaw, 10);
-    if (!Number.isFinite(idx) || idx < 1) {
+    const raw = String(params.index ?? '').trim();
+    if (!raw) {
       return {
         success: false,
         message:
-          '⚠️ Necesito un número. Ej: /cancelar_recordatorio 1. Mira la lista con /recordatorios.',
+          '⚠️ Necesito uno o más números. Ej: "/cancelar_recordatorio 1" o ' +
+          '"cancela los recordatorios 1, 2 y 4". Mira la lista con /recordatorios.',
       };
     }
-    const cancelledText = await this.store.cancelReminderByIndex(userId, idx);
-    if (!cancelledText) {
+    // Parsear "1", "1,2,4", "1, 2 y 4", "1 2 3" en lista de índices 1-based.
+    const indices = raw
+      .split(/[,\s]+|\s+y\s+/i)
+      .map((s) => parseInt(s, 10))
+      .filter((n) => Number.isFinite(n) && n >= 1);
+    if (indices.length === 0) {
       return {
         success: false,
-        message: `⚠️ No encontré el recordatorio #${idx}. Revisa la lista con /recordatorios.`,
+        message: '⚠️ No encontré números válidos. Ej: /cancelar_recordatorio 1, 2, 4.',
       };
     }
-    return { success: true, message: `🗑️ Cancelado: "${escapeMdV1(cancelledText)}".` };
+    // CRÍTICO: cancelar de mayor a menor para que los índices restantes no
+    // cambien durante la operación (cancelReminderByIndex re-indexa).
+    const sorted = Array.from(new Set(indices)).sort((a, b) => b - a);
+    const cancelled: string[] = [];
+    const notFound: number[] = [];
+    for (const i of sorted) {
+      const text = await this.store.cancelReminderByIndex(userId, i);
+      if (text) cancelled.unshift(text); // unshift para preservar orden ascendente
+      else notFound.push(i);
+    }
+    if (cancelled.length === 0) {
+      return {
+        success: false,
+        message: `⚠️ No encontré los recordatorios: ${notFound.sort((a, b) => a - b).join(', ')}. ` +
+          'Revisa la lista con /recordatorios.',
+      };
+    }
+    const escaped = cancelled.map((t) => `"${escapeMdV1(t)}"`).join(', ');
+    let msg = cancelled.length === 1
+      ? `🗑️ Cancelado: ${escaped}.`
+      : `🗑️ Cancelados (${cancelled.length}): ${escaped}.`;
+    if (notFound.length > 0) {
+      msg += `\n⚠️ No encontré: ${notFound.sort((a, b) => a - b).join(', ')}.`;
+    }
+    return { success: true, message: msg };
   }
 
   private async completeReminderWithTime(userId: string, params: Record<string, unknown>): Promise<ActionResult> {

@@ -451,6 +451,44 @@ describe('Capabilities Fase 3 — add/list/cancel', () => {
     expect(lastReply()).toMatch(/No encontré/i);
   });
 
+  test('regresión prod: multi-cancel "cancela los recordatorios 1, 2 y 4"', async () => {
+    await adapter.receive('/recordar en 1h tarea a');
+    await adapter.receive('/recordar en 2h tarea b');
+    await adapter.receive('/recordar en 3h tarea c');
+    await adapter.receive('/recordar en 4h tarea d');
+    adapter.reset();
+    await adapter.receive('cancela los recordatorios 1, 2 y 4');
+    expect(lastReply()).toMatch(/Cancelados \(3\)/i);
+    const list = await storage.adhdCoachStore.listReminders(user);
+    expect(list.length).toBe(1);
+    // Solo queda el "c" (que era el tercero originalmente).
+    expect(list[0].text).toContain('Tarea c');
+  });
+
+  test('regresión prod: /cancelar_recordatorio acepta lista', async () => {
+    await adapter.receive('/recordar en 1h a');
+    await adapter.receive('/recordar en 2h b');
+    adapter.reset();
+    await adapter.receive('/cancelar_recordatorio 1, 2');
+    expect(lastReply()).toMatch(/Cancelados \(2\)/i);
+  });
+
+  test('regresión prod: "Cancelar _ recordatorio N" (con espacios) funciona', async () => {
+    await adapter.receive('/recordar en 1h algo');
+    adapter.reset();
+    await adapter.receive('Cancelar _ recordatorio 1');
+    expect(lastReply()).toMatch(/Cancelado/i);
+  });
+
+  test('regresión prod: "Borra 1, 2 y 4" sin microtasks pero con recordatorios → sugiere comando', async () => {
+    await adapter.receive('/recordar en 1h a');
+    await adapter.receive('/recordar en 2h b');
+    adapter.reset();
+    await adapter.receive('Borra 1, 2 y 4');
+    expect(lastReply()).toMatch(/¿Querías cancelar recordatorios\?/i);
+    expect(lastReply()).toMatch(/cancela los recordatorios/i);
+  });
+
   test('/recordar sin args → orquestador pide el spec via pending_input', async () => {
     await adapter.receive('/recordar');
     // El orquestador detecta param requerido "spec" vacío y emite prompt.

@@ -371,6 +371,28 @@ describe('/agenda — flujo conversacional refactorizado', () => {
     expect(adapter.last()).toMatch(/Borrada.*tarea A/);
   });
 
+  test('4.1) /borrar acepta lista "1, 3"', async () => {
+    await storage.adhdCoachStore.addMicroTask(user, 'A');
+    await storage.adhdCoachStore.addMicroTask(user, 'B');
+    await storage.adhdCoachStore.addMicroTask(user, 'C');
+    adapter.reset();
+    await adapter.receive('/borrar 1, 3');
+    expect(adapter.last()).toMatch(/Borradas \(2\)/i);
+    const tasks = await storage.adhdCoachStore.getMicroTasks(user);
+    expect(tasks.length).toBe(1);
+    expect(tasks[0].text).toBe('B');
+  });
+
+  test('4.1) "borra 1, 2 y 3" NL multi', async () => {
+    await storage.adhdCoachStore.addMicroTask(user, 'A');
+    await storage.adhdCoachStore.addMicroTask(user, 'B');
+    await storage.adhdCoachStore.addMicroTask(user, 'C');
+    adapter.reset();
+    await adapter.receive('borra 1, 2 y 3');
+    expect(adapter.last()).toMatch(/Borradas \(3\)/i);
+    expect((await storage.adhdCoachStore.getMicroTasks(user)).length).toBe(0);
+  });
+
   test('4.1) "borra el 1" también borra', async () => {
     await storage.adhdCoachStore.addMicroTask(user, 'X');
     adapter.reset();
