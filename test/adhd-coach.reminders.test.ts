@@ -480,13 +480,17 @@ describe('Capabilities Fase 3 — add/list/cancel', () => {
     expect(lastReply()).toMatch(/Cancelado/i);
   });
 
-  test('regresión prod: "Borra 1, 2 y 4" sin microtasks pero con recordatorios → sugiere comando', async () => {
+  test('regresión prod: "Borra 1, 2" sin microtasks pero con recordatorios → cancela recordatorios directamente', async () => {
+    // Mejora UX: en vez de sugerir el comando correcto, el bot infiere
+    // por contexto que el usuario quería cancelar recordatorios. Si solo
+    // hay recordatorios, "Borra N" o "Cancela N" actúa sobre ellos.
     await adapter.receive('/recordar en 1h a');
     await adapter.receive('/recordar en 2h b');
     adapter.reset();
-    await adapter.receive('Borra 1, 2 y 4');
-    expect(lastReply()).toMatch(/¿Querías cancelar recordatorios\?/i);
-    expect(lastReply()).toMatch(/cancela los recordatorios/i);
+    await adapter.receive('Borra 1, 2');
+    expect(lastReply()).toMatch(/Cancelados \(2\)/i);
+    const list = await storage.adhdCoachStore.listReminders(user);
+    expect(list.length).toBe(0);
   });
 
   test('/recordar sin args → orquestador pide el spec via pending_input', async () => {
@@ -737,13 +741,13 @@ describe('Capabilities Fase 3 — add/list/cancel', () => {
     expect(lastReply()).toContain('Ir al pediatra');
   });
 
-  test('fallback de error actualizado menciona los nuevos formatos', async () => {
+  test('si hay texto pero no tiempo, bot pregunta "¿cuándo?" conversacional', async () => {
+    // Comportamiento actual (mejorado): si el spec tiene texto sustantivo,
+    // el bot pide cuándo en vez de soltar ejemplos sintácticos.
     await adapter.receive('/recordar texto basura sin tiempo');
     const r = lastReply();
-    expect(r).toMatch(/No entendí el tiempo/);
-    expect(r).toMatch(/pasado mañana/);
-    expect(r).toMatch(/jueves/);
-    expect(r).toMatch(/14\/05|dd\/mm/);
+    expect(r).toMatch(/cu[áa]ndo quieres que te recuerde/i);
+    expect(r).toMatch(/mañana|en 2h|viernes/i); // muestra ejemplos breves
   });
 
   // ─── Regresión prod: la confirmación de add NO debe ser muda ────────

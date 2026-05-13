@@ -593,6 +593,11 @@ export function reorderTimeToFront(spec: string): string {
     /^(.+?)\s+(a\s+las\s+\d{1,2}(?::\d{2})?(?:\s*(?:am|pm))?)\s*$/i,
     // "...el lunes 9am", "...el viernes"
     /^(.+?)\s+(el\s+(?:lunes|martes|mi[eé]rcoles|jueves|viernes|s[áa]bado|domingo)(?:\s+(?:a\s+las\s+)?\d{1,2}(?::\d{2})?(?:\s*(?:am|pm))?)?)\s*$/i,
+    // "...14:25", "...9:30am" — HH:MM al final SIN prefijo "a las".
+    // Acepta >= 1 palabra de texto antes (porque "reunión 3pm" es válido).
+    /^(\S+(?:\s+\S+)*)\s+(\d{1,2}:\d{2}(?:\s*(?:am|pm))?)\s*$/i,
+    // "...10am", "...3pm" — hora con am/pm al final.
+    /^(\S+(?:\s+\S+)*)\s+(\d{1,2}\s*(?:am|pm))\s*$/i,
   ];
   for (const re of trailingPatterns) {
     const m = trimmed.match(re);
@@ -1416,23 +1421,30 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
           return { spec: '' };
         },
       },
-      // /cancelar_recordatorio N (o lista: "1, 2 y 4"). Tolerante a:
-      //   - espacios alrededor del "_": "/cancelar _ recordatorio 3"
-      //   - sin slash inicial: "cancelar recordatorio 3"
-      //   - múltiples índices: "1, 2 y 4" / "1,2,4" / "1 2 4"
+      // Cancel reminder — máxima tolerancia a typos y variantes:
+      //   /cancelar_recordatorio N | /cancela_recordatorio N
+      //   /cancelar N (sin "recordatorio")  ← cuando hay recordatorios y NO microtasks
+      //   /cancela N | /cancel N
+      //   "cancela recordatorio N" | "cancela los recordatorios 1, 2 y 4"
+      //   "cancela _ recordatorio N" (espacios alrededor del _)
+      // Raíz verbal: cancel(ar|a|e) — tolera el typo común de omitir la R final.
       {
         patterns: [
-          /^\/?cancelar[\s_]+recordatorio[\s_]*\s*(\d+(?:[,\s]+(?:y\s+)?\d+)*)\s*$/i,
+          /^\/?cancel(?:ar|a|e)?[\s_]+(?:el\s+|los\s+|las\s+)?recordatorios?[\s_]*\s*(\d+(?:[,\s]+(?:y\s+)?\d+)*)\s*$/i,
         ],
         action: 'cancel_reminder',
         extractParams: (match) => ({ index: match[1] }),
       },
-      // NL: "(cancela|borra|elimina|quita) (el|los|las)? recordatorio(s)? <lista>"
-      // Importante: requiere la palabra "recordatorio(s)" para no chocar con
-      // /borrar N (microtasks).
+      // NL imperativo SIN la palabra "recordatorio" — para que "Cancela 1"
+      // o "Borra 1" enruten correctamente vía heurística del handler (que ya
+      // sugiere el comando correcto según el contexto: si hay solo
+      // recordatorios, sugiere cancel_reminder; si hay solo microtasks,
+      // borrar). Este match va a delete_micro_task como punto de entrada —
+      // el handler maneja la inferencia.
+      // NL eliminar/borrar (el|los|las)? recordatorio(s)? <lista>
       {
         patterns: [
-          /^(?:cancela|cancelar|borra|borrar|elimina|eliminar|quita|quitar)\s+(?:(?:el|los|las)\s+)?recordatorios?\s+(\d+(?:[,\s]+(?:y\s+)?\d+)*)\s*$/i,
+          /^(?:cancela|cancelar|cancele|borra|borrar|borre|elimina|eliminar|elimine|quita|quitar)\s+(?:(?:el|los|las)\s+)?recordatorios?\s+(\d+(?:[,\s]+(?:y\s+)?\d+)*)\s*$/i,
         ],
         action: 'cancel_reminder',
         extractParams: (match) => ({ index: match[1] }),
@@ -1551,9 +1563,26 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
       },
 
       // ── Fase 4.1 — edición/borrado granular de micro-tareas ──────────────
-      // /borrar N (o lista "1, 2 y 4")
+      // /borrar N (o lista). Raíz verbal: borr(ar|a|e|o) — tolera typos.
+      // También /elimina N, /elimine N, /quita N.
       {
-        patterns: [/^\/borrar\s+(\d+(?:[,\s]+(?:y\s+)?\d+)*)\s*$/i],
+        patterns: [
+          /^\/(?:borr(?:ar|a|e)|elimin(?:ar|a|e)|quit(?:ar|a|e))\s+(\d+(?:[,\s]+(?:y\s+)?\d+)*)\s*$/i,
+        ],
+        action: 'delete_micro_task',
+        extractParams: (match) => ({ index: match[1] }),
+      },
+      // Imperativo NL sin sustantivo: "Cancela 1", "Borra 1, 2", "Elimina 3".
+      // Va a delete_micro_task; el handler hace inferencia de contexto:
+      //   - Si hay microtasks → borra.
+      //   - Si NO hay microtasks pero SÍ recordatorios → delega a cancel_reminder.
+      // Slash inicial OPCIONAL (tolera typos del tipo "/cancela 1" donde el
+      // usuario quiso teclear un comando inexistente). NO matchea si viene
+      // con "recordatorio" o "tarea" (las reglas específicas ganan primero).
+      {
+        patterns: [
+          /^\/?(?:cancela|cancele|cancelar|borra|borre|borrar|elimina|elimine|eliminar|quita|quite|quitar)\s+(\d+(?:[,\s]+(?:y\s+)?\d+)*)\s*$/i,
+        ],
         action: 'delete_micro_task',
         extractParams: (match) => ({ index: match[1] }),
       },
@@ -1907,6 +1936,18 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
     if (indices.length === 0) {
       return { success: false, message: '⚠️ No encontré números válidos. Ej: /borrar 1, 2, 4.' };
     }
+    // ── Inferencia de contexto ─────────────────────────────────────────
+    // Si el usuario tipea "Borra N" o "Cancela N" SIN sustantivo y no
+    // tiene microtasks pero SÍ recordatorios, ejecutamos cancel_reminder
+    // directamente. Esto es lo que un humano espera: "estaba viendo
+    // recordatorios, no me hagas adivinar el comando exacto".
+    const allMicroTasks = await this.store.getMicroTasks(userId);
+    const reminders = await this.store.listReminders(userId);
+    if (allMicroTasks.length === 0 && reminders.length > 0) {
+      // Delegar a cancelReminder; el usuario claramente quería esto.
+      return this.cancelReminder(userId, { index: raw });
+    }
+
     // CRÍTICO: borrar de mayor a menor para que los índices restantes no
     // cambien durante la operación.
     const sorted = Array.from(new Set(indices)).sort((a, b) => b - a);
@@ -1918,20 +1959,7 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
       else notFound.push(i);
     }
     if (removed.length === 0) {
-      // Heurística amable: si no hay microtasks pero SÍ recordatorios,
-      // probablemente el usuario quería /cancelar_recordatorio.
-      const allMicroTasks = await this.store.getMicroTasks(userId);
-      const reminders = await this.store.listReminders(userId);
       const baseMsg = `⚠️ No encontré las micro-tareas: ${notFound.sort((a, b) => a - b).join(', ')}. Revisa /focus.`;
-      if (allMicroTasks.length === 0 && reminders.length > 0) {
-        const list = notFound.sort((a, b) => a - b).join(', ');
-        return {
-          success: false,
-          message:
-            '⚠️ No tienes micro-tareas para borrar. ' +
-            `¿Querías cancelar recordatorios? Prueba: "cancela los recordatorios ${list}".`,
-        };
-      }
       return { success: false, message: baseMsg };
     }
     const escaped = removed.map((t) => `"${escapeMdV1(t)}"`).join(', ');
@@ -2305,6 +2333,28 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
           message: '⚠️ Necesito también qué quieres recordar. Ej: "en 2h tomar agua".',
         };
       }
+      // parsed.reason === 'missing_time'.
+      // Si el spec tiene texto sustantivo, el usuario tiene la tarea clara
+      // pero le faltó cuándo. Guardar draft + pendingInput para que la
+      // siguiente respuesta (hora pura o spec completo) lo complete.
+      const looksLikeText = /[a-záéíóúñ]{3,}/i.test(rawSpec);
+      if (looksLikeText) {
+        await this.store.setPendingReminderDraft(userId, {
+          text: capFirst(rawSpec.trim()),
+          dayHint: 'tomorrow', // default; completeReminderWithTime acepta también specs completos.
+        });
+        return {
+          success: true,
+          message:
+            `🕒 ¿Cuándo quieres que te recuerde "${escapeMdV1(rawSpec.trim())}"? ` +
+            'Ej: "mañana 9am", "en 2h", "el viernes 10am".',
+          pendingInput: {
+            action: 'complete_reminder_with_time',
+            paramName: 'timeSpec',
+            prompt: '¿Cuándo?',
+          },
+        };
+      }
       return {
         success: false,
         message:
@@ -2406,7 +2456,6 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
   private async completeReminderWithTime(userId: string, params: Record<string, unknown>): Promise<ActionResult> {
     const draft = await this.store.getPendingReminderDraft(userId);
     if (!draft) {
-      // Si no hay draft, esta acción no aplica — degradar a sugerencia.
       return {
         success: false,
         message:
@@ -2415,22 +2464,44 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
       };
     }
     const timeSpec = String(params.timeSpec ?? '').trim();
-    // parseTimeForHint maneja todos los formatos de dayHint (literales +
-    // 'date:YYYY-MM-DD' + 'dow:N'). El draft de "manana" sigue funcionando
-    // porque hint='tomorrow' es uno de los casos soportados.
+
+    // Path 1 — hora suelta. Funciona para "9am", "15:00", "mañana 9am".
     const due = parseTimeForHint(timeSpec, draft.dayHint);
-    if (!due) {
+    if (due) {
+      await this.store.clearPendingReminderDraft(userId);
+      const { id } = await this.store.addReminder(userId, draft.text, due.toISOString());
       return {
-        success: false,
-        message: '⚠️ No entendí la hora. Prueba con 9am, 15:00, o "a las 18:00".',
+        success: true,
+        message:
+          `✅ Listo, te recuerdo "${escapeMdV1(draft.text)}" el ${formatLocalDateTime(due.toISOString())}. (id ${id})`,
       };
     }
-    await this.store.clearPendingReminderDraft(userId);
-    const { id } = await this.store.addReminder(userId, draft.text, due.toISOString());
+
+    // Path 2 — spec completo: el usuario respondió con fecha+hora ("el
+    // viernes 10am", "pasado mañana 18:00", "en 2 horas"). Combinamos con
+    // el texto del draft y reusamos parseReminderSpec.
+    const combined = reorderTimeToFront(`${timeSpec} ${draft.text}`.trim());
+    const parsed = parseReminderSpec(combined);
+    if (parsed.ok) {
+      await this.store.clearPendingReminderDraft(userId);
+      const { id } = await this.store.addReminder(userId, parsed.text, parsed.dueAt.toISOString());
+      return {
+        success: true,
+        message:
+          `✅ Listo, te recuerdo "${escapeMdV1(parsed.text)}" el ${formatLocalDateTime(parsed.dueAt.toISOString())}. (id ${id})`,
+      };
+    }
+
+    // Path 3 — nada parseó. Mantener draft, pedir hora otra vez.
     return {
-      success: true,
+      success: false,
       message:
-        `✅ Listo, te recuerdo "${escapeMdV1(draft.text)}" el ${formatLocalDateTime(due.toISOString())}. (id ${id})`,
+        '⚠️ No entendí cuándo. Prueba con "9am", "mañana 10am", "en 2 horas" o "el viernes 9am".',
+      pendingInput: {
+        action: 'complete_reminder_with_time',
+        paramName: 'timeSpec',
+        prompt: '¿Cuándo?',
+      },
     };
   }
 

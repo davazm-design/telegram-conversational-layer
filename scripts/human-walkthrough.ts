@@ -42,7 +42,7 @@ const FALLBACK = /No lo entend[íi] del todo/i;
 // Otros mensajes de error "claros" (no son el fallback genérico).
 // Si un caso fallbackOk acepta cualquiera de estos, lo contamos como WARN
 // en vez de FAIL (el bot está respondiendo útilmente).
-const CLEAR_ERROR = /No entend[íi]|necesito|no encontr[ée]|prueba con|⚠️/i;
+const CLEAR_ERROR = /No entend[íi]|necesito|no encontr[ée]|prueba con|⚠️|🕒|cu[áa]ndo/i;
 
 interface Case {
   category: string;
@@ -94,7 +94,7 @@ const cases: Case[] = [
   // ── 4. RECORDATORIO SIN HORA O SIN TEXTO ──────────────────────────────
   { category: 'parcial', description: '/recordar sin args', input: '/recordar', expectAny: [/cu[áa]l es|cu[áa]l|qu[eé]/i] },
   { category: 'parcial', description: '/recordar solo hora sin texto', input: '/recordar mañana 9am', expectAny: [/qu[eé] quieres recordar|necesito tambi[eé]n|texto/i], fallbackOk: true },
-  { category: 'parcial', description: '/recordar solo texto sin hora', input: '/recordar comprar pan', expectAny: [/no entend[íi] el tiempo|qu[eé] hora|hora/i] },
+  { category: 'parcial', description: '/recordar solo texto sin hora → pregunta "¿cuándo?"', input: '/recordar comprar pan', expectAny: [/cu[áa]ndo quieres que te recuerde/i] },
 
   // ── 5. EDITAR / CANCELAR RECORDATORIOS ────────────────────────────────
   { category: 'editar-recordatorio', description: 'cancelar por número', setup: ['/recordar mañana 9am algo'], input: '/cancelar_recordatorio 1', expectAny: [/Cancelado/i] },
@@ -157,7 +157,31 @@ const cases: Case[] = [
   { category: 'errores-typo', description: 'typo recodatorio', input: '/recodatorio mañana 9am algo', expectAny: [/recordatorio guardado/i], fallbackOk: true },
   { category: 'errores-typo', description: 'emoji al final', input: '/recordar mañana 9am tomar pastilla 💊', expectAny: [/recordatorio guardado/i] },
 
-  // ── 13. CRISIS DURANTE FLUJOS — siempre gana ─────────────────────────
+  // ── 13b. TYPOS COMUNES (clase de bug recurrente en producción) ───────
+  // Patrones que el usuario teclea bajo carga cognitiva. Cada uno representa
+  // una clase, no un caso aislado. Cuando aparezca uno nuevo en uso real,
+  // se añade aquí para que NUNCA vuelva a romperse silenciosamente.
+  { category: 'typos', description: '/borra N (falta R)', setup: ['/agenda A, B', 'todos'], input: '/borra 1', expectAny: [/Borrada|Cancelado/i] },
+  { category: 'typos', description: '/cancela N (falta R)', setup: ['/recordar en 1h algo'], input: '/cancela 1', expectAny: [/Cancelado/i] },
+  { category: 'typos', description: '/cancele N (typo de raíz)', setup: ['/recordar en 1h algo'], input: '/cancele 1', expectAny: [/Cancelado/i] },
+  { category: 'typos', description: 'Cancela N sin "recordatorio" cuando hay recordatorios', setup: ['/recordar en 1h algo'], input: 'Cancela 1', expectAny: [/Cancelado/i] },
+  { category: 'typos', description: 'Borra N sin "tarea" cuando hay microtasks', setup: ['/agenda A, B', 'todos'], input: 'Borra 1', expectAny: [/Borrada/i] },
+  { category: 'typos', description: 'Elimina N (sustantivo implícito)', setup: ['/agenda A, B', 'todos'], input: 'Elimina 1', expectAny: [/Borrada/i] },
+  { category: 'typos', description: 'Cancelar _ recordatorio N (espacios en _)', setup: ['/recordar en 1h algo'], input: 'Cancelar _ recordatorio 1', expectAny: [/Cancelado/i] },
+
+  // ── 13c. TIEMPO TRAILING en variantes (clase) ──────────────────────────
+  { category: 'time-trailing', description: 'HH:MM al final', input: '/recordar cita doctora Soto 14:25', expectAny: [/recordatorio guardado/i] },
+  { category: 'time-trailing', description: 'HH am al final', input: '/recordar reunión 3pm', expectAny: [/recordatorio guardado/i] },
+  { category: 'time-trailing', description: 'mañana al final', input: '/recordar llamar al doctor mañana 9am', expectAny: [/recordatorio guardado/i] },
+  { category: 'time-trailing', description: 'el viernes al final', input: '/recordar reunión con jefe el viernes 10am', expectAny: [/recordatorio guardado/i] },
+  { category: 'time-trailing', description: 'en N min al final', input: '/recordar tomar agua en 30 min', expectAny: [/recordatorio guardado/i] },
+  { category: 'time-trailing', description: 'a las HH al final', input: '/recordar tomar pastilla a las 8am', expectAny: [/recordatorio guardado/i] },
+
+  // ── 13d. RECORDATORIO SIN HORA → preguntar conversacional ──────────────
+  { category: 'recordar-incomplete', description: 'spec sin hora pide "¿cuándo?"', input: '/recordatorio cita con doctora Soto', expectAny: [/Cuándo quieres que te recuerde/i] },
+  // Sin probar el follow-up porque requiere setup más complejo; cubierto en test/.
+
+  // ── 14. CRISIS DURANTE FLUJOS — siempre gana ─────────────────────────
   { category: 'crisis', description: 'crisis directa', input: 'no quiero seguir', expectAny: [/quiero que est[ée]s a salvo/i] },
   { category: 'crisis', description: 'crisis durante /rpec', setup: ['/rpec'], input: 'mejor desaparecer', expectAny: [/quiero que est[ée]s a salvo/i] },
   { category: 'crisis', description: 'crisis durante /agenda volcado', setup: ['/agenda'], input: 'no veo salida', expectAny: [/quiero que est[ée]s a salvo/i] },
