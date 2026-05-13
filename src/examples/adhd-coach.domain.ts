@@ -327,8 +327,8 @@ function parseDatePrefix(norm: string, today: WallCalendar): DatePrefixMatch | n
     return { prefix: { kind: 'date', year, month0, day }, rest: (m[3] ?? '').trim() };
   }
 
-  // "[el] <dow>"  (palabra única que sea día de la semana válido)
-  m = norm.match(/^(?:el\s+)?([a-z]+)(?:\s+(.*))?$/);
+  // "[el] [próximo|próxima|siguiente] <dow>"
+  m = norm.match(/^(?:el\s+)?(?:(?:proximo|proxima|siguiente|que viene)\s+)?([a-z]+)(?:\s+(.*))?$/);
   if (m) {
     const dow = dowFromName(m[1]);
     if (dow !== null) {
@@ -344,8 +344,28 @@ function parseDatePrefix(norm: string, today: WallCalendar): DatePrefixMatch | n
 
 function parseTimeFromStart(rest: string): { hour: number; minute: number; restAfter: string } | null {
   if (!rest) return null;
+  // Sinónimos: "mediodía" → 12:00, "medianoche" → 00:00.
+  // "[a/al] mediodía <text>" / "[a] medianoche <text>"
+  let m = rest.match(/^(?:al?\s+)?(mediodia|medianoche)\b\s*(.*)$/i);
+  if (m) {
+    const isNoon = /mediodia/i.test(m[1]);
+    const text = (m[2] ?? '').trim();
+    if (!text) return null; // necesita texto después
+    return { hour: isNoon ? 12 : 0, minute: 0, restAfter: text };
+  }
+  // Franjas vagas: "(en|por|a) la (mañana|tarde|noche)" → 9 / 16 / 20.
+  // Defaults razonables para usuario mexicano. Si el usuario quiere precisión,
+  // puede dar hora exacta. No abusamos: solo si la frase aparece al inicio.
+  m = rest.match(/^(?:en|por|a)\s+la\s+(manana|tarde|noche|tardenoche)\b\s*(.*)$/i);
+  if (m) {
+    const text = (m[2] ?? '').trim();
+    if (!text) return null;
+    const franja = m[1].toLowerCase();
+    const hour = franja === 'manana' ? 9 : (franja === 'tarde' ? 16 : 20);
+    return { hour, minute: 0, restAfter: text };
+  }
   // "[a las] HH:MM[am|pm] <text>"
-  let m = rest.match(/^(?:a\s+las\s+)?(\d{1,2}):(\d{2})\s*(am|pm)?\s+(.*)$/i);
+  m = rest.match(/^(?:a\s+las\s+)?(\d{1,2}):(\d{2})\s*(am|pm)?\s+(.*)$/i);
   if (m) {
     const h = hourTo24(parseInt(m[1], 10), m[3]);
     if (h === null) return null;
@@ -423,18 +443,19 @@ export function parseReminderSpec(spec: string, now: Date = new Date()): ParseRe
   const tz = reminderTz();
   const today = getCalendarPartsInTz(now, tz);
 
-  // (0) Relativo "en X (min|h|d) <texto>" — TZ-independent, no requiere
-  //     prefijo de fecha. Mantener primero porque "en 2h tomar agua" no
-  //     debe matchear nada de la cascada de fechas.
-  let m = norm.match(/^en\s+(\d+)\s*(min(?:utos?)?|h|hora|horas|d|dia|dias)\b\s*(.*)$/);
+  // (0) Relativo "en X (seg|min|h|d|sem) <texto>" — TZ-independent.
+  //     Acepta: segundos, minutos, horas, días, semanas.
+  let m = norm.match(/^en\s+(\d+)\s*(seg(?:undos?)?|s|min(?:utos?)?|h|hora|horas|d|dia|dias|sem|semana|semanas)\b\s*(.*)$/);
   if (m) {
     const n = parseInt(m[1], 10);
     const unit = m[2];
     const text = (m[3] ?? '').trim();
     if (!text) return { ok: false, reason: 'missing_text' };
     let ms = 0;
-    if (unit.startsWith('min')) ms = n * 60_000;
+    if (unit === 's' || unit.startsWith('seg')) ms = n * 1_000;
+    else if (unit.startsWith('min')) ms = n * 60_000;
     else if (unit === 'h' || unit.startsWith('hora')) ms = n * 3_600_000;
+    else if (unit.startsWith('sem')) ms = n * 7 * 86_400_000;
     else ms = n * 86_400_000;
     return { ok: true, dueAt: new Date(now.getTime() + ms), text: capFirst(text) };
   }
@@ -453,9 +474,15 @@ export function parseReminderSpec(spec: string, now: Date = new Date()): ParseRe
     // Hay fecha pero NO hora → guardar draft y pedir hora.
     const text = datePrefix.rest.trim();
     if (!text) return { ok: false, reason: 'missing_text' };
+    // Defensa: si el "texto" es solo una hora suelta (ej "9am", "15:00"),
+    // el usuario realmente no especificó qué recordar. Devolver missing_text
+    // con el mensaje "falta el texto" en vez de pedir hora con texto raro.
+    const looksLikeOnlyTime = /^(?:a\s+las\s+)?\d{1,2}(?::\d{2})?\s*(am|pm)?$/i.test(text)
+      || /^(?:al?\s+)?(mediodia|medianoche)$/i.test(stripAccentsLower(text));
+    if (looksLikeOnlyTime) {
+      return { ok: false, reason: 'missing_text' };
+    }
     if (datePrefix.prefix.kind === 'rel' && datePrefix.prefix.dayOffset === 1) {
-      // "manana <texto>" mantiene el reason histórico para preservar el
-      // mensaje conocido y los tests existentes.
       return { ok: false, reason: 'tomorrow_needs_hour', text: capFirst(text) };
     }
     return {
@@ -594,6 +621,38 @@ export function parseAgendaSelection(
   // 3) "Todos" / "todo" / "todas".
   if (/^(todos|todo|todas|todas las anteriores|todos los anteriores)\b/.test(norm)) {
     return { kind: 'indices', indices: candidates.map((_, i) => i) };
+  }
+
+  // 4a) Ordinales: "primero", "segundo", etc. → mapeo a número.
+  // Permite "primero y tercero", "el primero", "el segundo y el quinto".
+  const ORDINALS: Record<string, number> = {
+    primero: 1, primer: 1, primera: 1,
+    segundo: 2, segunda: 2,
+    tercero: 3, tercer: 3, tercera: 3,
+    cuarto: 4, cuarta: 4,
+    quinto: 5, quinta: 5,
+    sexto: 6, sexta: 6,
+    septimo: 7, septima: 7,
+    octavo: 8, octava: 8,
+    noveno: 9, novena: 9,
+    decimo: 10, decima: 10,
+    ultimo: -1, ultima: -1, // -1 marcador → último candidato
+  };
+  const ordTokens = norm
+    .replace(/\bel\s+|\bla\s+|\blos\s+|\blas\s+/g, ' ')
+    .split(/,|\s+y\s+|\s+/)
+    .map((p) => p.trim())
+    .filter((p) => p in ORDINALS);
+  if (ordTokens.length > 0) {
+    const idxs = ordTokens
+      .map((t) => ORDINALS[t])
+      .map((n) => (n === -1 ? candidates.length : n))
+      .filter((n) => n >= 1 && n <= candidates.length)
+      .map((n) => n - 1);
+    if (idxs.length > 0) {
+      const unique = Array.from(new Set(idxs));
+      return { kind: 'indices', indices: unique };
+    }
   }
 
   // 4) Índices numéricos. Split por ",", " y ", o espacios.
@@ -1047,6 +1106,14 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
         riskLevel: RiskLevel.READ_ONLY,
         requiresConfirmation: false,
       },
+      {
+        // Saludo / agradecimiento / despedida — respuesta cálida sin forzar acción.
+        name: 'greeting',
+        description: 'Responde a saludos y mensajes sociales breves',
+        parameters: {},
+        riskLevel: RiskLevel.READ_ONLY,
+        requiresConfirmation: false,
+      },
     ];
   }
 
@@ -1238,19 +1305,52 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
           return { spec };
         },
       },
-      // NL: "recuérdame X" / "recuerdame X" → add_reminder con spec=X
-      // (el /help promete esta frase: "recuérdame mañana a las 9 llamar al doctor")
+      // NL: variantes naturales de "crear recordatorio" → add_reminder.
+      // Cubre: "recuérdame X", "me recuerdas X", "recordarme X", "necesito que
+      // me recuerdes X", "(agrega|crea|pon|ponme) un recordatorio (para)? X".
       {
-        patterns: [/^recuerdame\s+(.+)$/i],
+        patterns: [
+          /^recuerdame\s+(.+)$/i,
+          /^recordarme\s+(.+)$/i,
+          /^me\s+recuerdas\s+(.+)$/i,
+          /^necesito\s+que\s+me\s+recuerdes\s+(.+)$/i,
+          /^(?:agrega|crea|pon|ponme|programa)\s+(?:un\s+)?recordatorio(?:\s+para)?\s+(.+)$/i,
+        ],
         action: 'add_reminder',
         extractParams: (_match, _normalized, rawText) => {
-          const m = rawText.match(/^recu[eé]rdame\s+(.+)$/i);
-          return { spec: (m?.[1] ?? '').trim() };
+          const patterns = [
+            /^recu[eé]rdame\s+(.+)$/i,
+            /^recordarme\s+(.+)$/i,
+            /^me\s+recuerdas\s+(.+)$/i,
+            /^necesito\s+que\s+me\s+recuerdes\s+(.+)$/i,
+            /^(?:agrega|crea|pon|ponme|programa)\s+(?:un\s+)?recordatorio(?:\s+para)?\s+(.+)$/i,
+          ];
+          for (const re of patterns) {
+            const m = rawText.match(re);
+            if (m) {
+              // Quitar "el " inicial común: "para el 22 de mayo" → "22 de mayo".
+              let spec = m[1].trim().replace(/^el\s+/i, '');
+              // Limpiar ":" después de hora suelta: "9am: texto" → "9am texto".
+              spec = spec.replace(/(\d{1,2}(?::\d{2})?(?:\s*(?:am|pm))?)\s*:\s+/i, '$1 ');
+              return { spec };
+            }
+          }
+          return { spec: '' };
         },
       },
       // /cancelar_recordatorio N
       {
         patterns: [/^\/cancelar_recordatorio\s+(\d+)$/i],
+        action: 'cancel_reminder',
+        extractParams: (match) => ({ index: match[1] }),
+      },
+      // NL: "(cancela|borra|elimina|quita) (el)? recordatorio N"
+      // Importante: pide explícitamente la palabra "recordatorio" para no
+      // chocar con /borrar N (microtasks).
+      {
+        patterns: [
+          /^(?:cancela|cancelar|borra|borrar|elimina|eliminar|quita|quitar)\s+(?:el\s+)?recordatorio\s+(\d+)$/i,
+        ],
         action: 'cancel_reminder',
         extractParams: (match) => ({ index: match[1] }),
       },
@@ -1288,6 +1388,9 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
       {
         patterns: [
           /^(quiero ver mis recordatorios|muestrame mis recordatorios|ver mis recordatorios|cuales son mis recordatorios)$/,
+          /^(?:que|cuales)\s+recordatorios\s+tengo\??$/,
+          /^(?:tengo\s+recordatorios|hay\s+recordatorios)\??$/,
+          /^mis\s+(?:recordatorios|pendientes)$/,
         ],
         action: 'list_reminders',
       },
@@ -1350,6 +1453,9 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
       {
         patterns: [
           /^(estoy saturado|estoy bloqueado|no puedo empezar|tengo la cabeza llena|no me da la vida|estoy colapsado|no se por donde empezar)$/,
+          // Emocional no-crisis: cansancio, malestar inespecífico, dificultad
+          // de foco. Regulación primero (no agenda push).
+          /^(no me siento bien|hoy fue (?:un )?d[íi]a dif[íi]cil|estoy cansad[oa]|no logro concentrarme|me siento mal|no puedo concentrarme)$/,
         ],
         action: 'neuro_reset',
       },
@@ -1377,11 +1483,11 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
           return { index: m?.[1] ?? '', text: (m?.[2] ?? '').trim() };
         },
       },
-      // NL: "elimina/borra (el)? (punto|item|numero)? N"
-      // Permite "el" y el sustantivo independientes: "borra el 1",
-      // "elimina punto 3", "borra el punto 5", "quita 2" — todo OK.
+      // NL: "elimina/borra (el|la)? (punto|item|numero|tarea|microtarea)? N"
+      // Permite artículo el/la y sustantivo independientes. NO captura
+      // "recordatorio" porque eso es cancel_reminder (regla separada).
       {
-        patterns: [/^(?:elimina|borra|quita)\s+(?:el\s+)?(?:(?:punto|item|numero|n[úu]mero)\s+)?(\d+)$/i],
+        patterns: [/^(?:elimina|borra|quita)\s+(?:(?:el|la)\s+)?(?:(?:punto|item|numero|n[úu]mero|tarea|microtarea|micro)\s+)?(\d+)$/i],
         action: 'delete_micro_task',
         extractParams: (match) => ({ index: match[1] }),
       },
@@ -1403,6 +1509,23 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
           }
           return { index: match[1], text: match[2].trim() };
         },
+      },
+
+      // ── Saludos / agradecimientos / despedidas (UX social) ───────────────
+      {
+        patterns: [/^(hola|hey|que tal|saludos|holi|holaa+|holis)\??$/],
+        action: 'greeting',
+        extractParams: () => ({ kind: 'hello' }),
+      },
+      {
+        patterns: [/^(gracias|mil gracias|muchas gracias|perfecto|excelente|genial)\!?$/],
+        action: 'greeting',
+        extractParams: () => ({ kind: 'thanks' }),
+      },
+      {
+        patterns: [/^(adios|chao|hasta luego|nos vemos|bye)\!?$/],
+        action: 'greeting',
+        extractParams: () => ({ kind: 'bye' }),
       },
 
       // ── Fase 4C — Reencuadre NL (frases automáticas comunes) ─────────────
@@ -1502,6 +1625,8 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
         return await this.spiritualMode(userId);
       case 'neuro_or_faith_offer':
         return await this.neuroOrFaithOffer(userId);
+      case 'greeting':
+        return this.greeting(params);
       default:
         return { success: false, message: `Acción "${action}" no implementada en ADHD Coach.` };
     }
@@ -2627,6 +2752,20 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
         prompt: '¿A, B, C, D o E?',
       },
     };
+  }
+
+  private greeting(params: Record<string, unknown>): ActionResult {
+    // Distingue saludo / agradecimiento / despedida por la sub-categoría
+    // que extrae la regla (param.kind). Default: bienvenida breve.
+    const kind = String(params.kind ?? 'hello');
+    const replies: Record<string, string> = {
+      hello:
+        'Hola. ¿Qué quieres hacer hoy? Puedo ayudarte con tu día, recordatorios, ' +
+        'regulación, oración o solo escuchar. Escribe /help si quieres ver todo.',
+      thanks: 'De nada. ¿En qué más te ayudo?',
+      bye: 'Hasta luego. Aquí estoy cuando me necesites. 🙏',
+    };
+    return { success: true, message: replies[kind] ?? replies.hello };
   }
 
   private async neuroOrFaithOffer(userId: string): Promise<ActionResult> {
