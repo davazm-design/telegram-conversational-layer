@@ -62,7 +62,7 @@ interface MemoryReminder {
 class MemoryAdhdCoachStore implements IAdhdCoachStore {
   constructor(private domainId: string) {}
   private checkins = new Map<string, { date: string; completed: boolean }[]>();
-  private microTasks = new Map<string, { id: string; text: string; completed: boolean }[]>();
+  private microTasks = new Map<string, { id: string; text: string; completed: boolean; priority?: string | null }[]>();
   private focusSessions = new Map<string, { task: string; completed: boolean }[]>();
   private silenceUntil = new Map<string, string>();
   // Fase 3: reminders
@@ -118,6 +118,15 @@ class MemoryAdhdCoachStore implements IAdhdCoachStore {
     list[index1Based - 1].text = newText;
     this.microTasks.set(k, list);
     return oldText;
+  }
+
+  async setMicroTaskPriority(userId: string, index1Based: number, priority: string | null): Promise<string | null> {
+    const k = this.key(userId);
+    const list = this.microTasks.get(k) ?? [];
+    if (index1Based < 1 || index1Based > list.length) return null;
+    list[index1Based - 1].priority = priority;
+    this.microTasks.set(k, list);
+    return list[index1Based - 1].text;
   }
 
   async getFocusSessions(userId: string) { return this.focusSessions.get(this.key(userId)) ?? []; }

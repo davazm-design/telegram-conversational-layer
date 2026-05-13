@@ -79,8 +79,16 @@ class PostgresAdhdCoachStore implements IAdhdCoachStore {
   }
 
   async getMicroTasks(userId: string) {
-    const res = await this.pool.query('SELECT id, text, completed FROM adhd_items WHERE domain_id = $1 AND user_id = $2 AND type = $3 ORDER BY created_at ASC', [this.domainId, userId, 'microtask']);
-    return res.rows.map((r, i) => ({ id: String(i + 1), text: r.text, completed: r.completed, dbId: r.id }));
+    // El campo `date` se recicla para guardar la prioridad Eisenhower
+    // ('now'|'plan'|'quick'|'later'|null). Cero schema change.
+    const res = await this.pool.query('SELECT id, text, completed, date FROM adhd_items WHERE domain_id = $1 AND user_id = $2 AND type = $3 ORDER BY created_at ASC', [this.domainId, userId, 'microtask']);
+    return res.rows.map((r, i) => ({
+      id: String(i + 1),
+      text: r.text,
+      completed: r.completed,
+      priority: r.date ?? null,
+      dbId: r.id,
+    }));
   }
   async addMicroTask(userId: string, text: string) {
     await this.pool.query('INSERT INTO adhd_items (domain_id, user_id, type, text, completed) VALUES ($1, $2, $3, $4, false)', [this.domainId, userId, 'microtask', text]);
@@ -114,6 +122,17 @@ class PostgresAdhdCoachStore implements IAdhdCoachStore {
       [newText, (target as { dbId: number }).dbId, this.domainId],
     );
     return oldText;
+  }
+
+  async setMicroTaskPriority(userId: string, index1Based: number, priority: string | null): Promise<string | null> {
+    const tasks = await this.getMicroTasks(userId);
+    if (index1Based < 1 || index1Based > tasks.length) return null;
+    const target = tasks[index1Based - 1];
+    await this.pool.query(
+      'UPDATE adhd_items SET date = $1 WHERE id = $2 AND domain_id = $3',
+      [priority, (target as { dbId: number }).dbId, this.domainId],
+    );
+    return target.text;
   }
 
   async getFocusSessions(userId: string) {

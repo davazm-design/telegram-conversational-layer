@@ -195,6 +195,15 @@ const cases: Case[] = [
   { category: 'espiritual', description: '/espiritual', input: '/espiritual', expectAny: [/A\).*oraci[óo]n/i] },
   { category: 'espiritual', description: 'fe + procrastinación', input: 'Dios ayúdame con esta procrastinación', expectAny: [/neurociencia|espiritualidad|ambos/i] },
 
+  // ── Fase 4.3 — Matriz de Eisenhower ──────────────────────────────────
+  { category: 'eisenhower', description: '/prioriza sin tareas', input: '/prioriza', expectAny: [/no tienes tareas|empieza con \/agenda/i] },
+  { category: 'eisenhower', description: '/siguiente sin tareas', input: '/siguiente', expectAny: [/no tienes tareas|empieza con \/agenda/i] },
+  { category: 'eisenhower', description: '/prioriza con tareas pide A/B/C/D', setup: ['/agenda A, B, C', 'todos'], input: '/prioriza', expectAny: [/Urgente.*Importante.*Ambas.*Puede esperar/is] },
+  { category: 'eisenhower', description: 'responder A clasifica como quick', setup: ['/agenda A, B, C', 'todos', '/prioriza'], input: 'A', expectAny: [/\d\/3|"B"/i] },
+  { category: 'eisenhower', description: 'NL "prioriza mi día"', input: 'prioriza mi día', expectAny: [/no tienes tareas|Urgente/i] },
+  { category: 'eisenhower', description: 'NL "qué tengo que hacer ahora"', input: 'qué tengo que hacer ahora', expectAny: [/no tienes tareas|empieza con \/agenda|tu siguiente|sin clasificar/i] },
+  { category: 'eisenhower', description: 'NL "cuál es mi siguiente"', input: 'cuál es mi siguiente', expectAny: [/no tienes tareas|tu siguiente|sin clasificar/i] },
+
   // ── 19. ESCAPES Y CANCELACIÓN ────────────────────────────────────────
   { category: 'escape', description: '/cancel mid-flow', setup: ['/rpec'], input: '/cancel', expectAny: [/cancelada|cancelar/i] },
   { category: 'escape', description: 'slash command durante TCC', setup: ['/rpec'], input: '/recordatorios', expectAny: [/recordatorios pendientes|no tienes/i] },

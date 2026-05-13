@@ -1147,6 +1147,30 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
         riskLevel: RiskLevel.READ_ONLY,
         requiresConfirmation: false,
       },
+      // ── Fase 4.3: matriz de Eisenhower ────────────────────────────────────
+      {
+        name: 'prioritize_tasks_start',
+        description: 'Clasifica micro-tareas por urgencia e importancia',
+        parameters: {},
+        riskLevel: RiskLevel.LOW_RISK_WRITE,
+        requiresConfirmation: false,
+      },
+      {
+        name: 'prioritize_step',
+        description: 'Captura la prioridad A/B/C/D para la tarea pendiente',
+        parameters: {
+          answer: { type: 'string', description: 'A, B, C o D', required: true },
+        },
+        riskLevel: RiskLevel.LOW_RISK_WRITE,
+        requiresConfirmation: false,
+      },
+      {
+        name: 'next_action',
+        description: 'Muestra la siguiente acción a tomar según prioridad',
+        parameters: {},
+        riskLevel: RiskLevel.READ_ONLY,
+        requiresConfirmation: false,
+      },
     ];
   }
 
@@ -1179,6 +1203,10 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
       '/oracion': 'christian_prayer',
       '/devocional': 'christian_devotional',
       '/espiritual': 'spiritual_mode',
+      // Fase 4.3 — matriz de Eisenhower
+      '/prioriza': 'prioritize_tasks_start',
+      '/priorizar': 'prioritize_tasks_start',
+      '/siguiente': 'next_action',
       // Fase 4.1: edición de micro-tareas (con args via reglas también)
       // /borrar N y /editar N <texto> se manejan via reglas; no mapeamos aquí
       // porque admiten argumentos. Si el usuario teclea /borrar solo, cae
@@ -1544,6 +1572,20 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
         },
       },
 
+      // ── Fase 4.3 — Eisenhower NL ─────────────────────────────────────────
+      {
+        patterns: [
+          /^(prioriza|priorizar|prioriza mi d[ií]a|ayudame a priorizar|que es lo mas importante|que es lo mas urgente)\??$/i,
+        ],
+        action: 'prioritize_tasks_start',
+      },
+      {
+        patterns: [
+          /^(siguiente|cu[áa]l es mi siguiente|que tengo que hacer ahora|que hago primero|que hago ahora|cu[áa]l es la siguiente)\??$/i,
+        ],
+        action: 'next_action',
+      },
+
       // ── Saludos / agradecimientos / despedidas (UX social) ───────────────
       {
         patterns: [/^(hola|hey|que tal|saludos|holi|holaa+|holis)\??$/],
@@ -1660,6 +1702,12 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
         return await this.neuroOrFaithOffer(userId);
       case 'greeting':
         return this.greeting(params);
+      case 'prioritize_tasks_start':
+        return await this.prioritizeTasksStart(userId);
+      case 'prioritize_step':
+        return await this.prioritizeStep(userId, params);
+      case 'next_action':
+        return await this.nextAction(userId);
       default:
         return { success: false, message: `Acción "${action}" no implementada en ADHD Coach.` };
     }
@@ -1740,13 +1788,29 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
     }
 
     if (tasks.length > 0) {
+      // Si hay alguna tarea con prioridad, mostrar la "siguiente" destacada.
+      const pendingTasks = tasks.filter((t) => !t.completed);
+      const withPriority = pendingTasks.filter((t) => t.priority);
+      let nextIndex1: number | null = null;
+      if (withPriority.length > 0) {
+        const sorted = [...withPriority].sort((a, b) => {
+          const ra = AdhdCoachDomainHandler.PRIORITY_RANK[a.priority ?? 'later'] ?? 99;
+          const rb = AdhdCoachDomainHandler.PRIORITY_RANK[b.priority ?? 'later'] ?? 99;
+          return ra - rb;
+        });
+        const nextTask = sorted[0];
+        nextIndex1 = tasks.findIndex((t) => t === nextTask) + 1;
+        const label = AdhdCoachDomainHandler.PRIORITY_LABEL[nextTask.priority ?? 'later'] ?? '';
+        lines.push(`⭐ *Siguiente:* "${nextTask.text}" (${label})`, '');
+      }
       lines.push('*Micro-tareas:*');
       tasks.forEach((t, i) => {
         const check = t.completed ? '✅' : '⬜';
-        lines.push(`  ${check} ${i + 1}. ${t.text}`);
+        const star = (i + 1 === nextIndex1) ? ' ⭐' : '';
+        const prio = t.priority ? ` _(${AdhdCoachDomainHandler.PRIORITY_LABEL[t.priority] ?? t.priority})_` : '';
+        lines.push(`  ${check} ${i + 1}. ${t.text}${prio}${star}`);
       });
-      const pending = tasks.filter((t) => !t.completed).length;
-      lines.push('', `_${pending} pendiente(s). Escribe "listo 1" para completar._`);
+      lines.push('', `_${pendingTasks.length} pendiente(s). Escribe "listo 1" para completar._`);
     }
 
     return { success: true, message: lines.join('\n') };
@@ -2375,6 +2439,8 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
       '/focus — ver foco y microtareas.',
       '/borrar N — borrar la micro-tarea número N.',
       '/editar N nuevo texto — cambiar la micro-tarea N.',
+      '/prioriza — clasificar tareas (urgente/importante).',
+      '/siguiente — ver tu próxima acción.',
       '',
       'Regulación y procrastinación:',
       '/reset90 — regularte cuando estás saturado.',
@@ -2803,6 +2869,190 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
       bye: 'Hasta luego. Aquí estoy cuando me necesites. 🙏',
     };
     return { success: true, message: replies[kind] ?? replies.hello };
+  }
+
+  // ─── Fase 4.3: matriz de Eisenhower ──────────────────────────────────────
+  // priorityLabel mapea valor interno → texto humano sin juicio.
+  private static readonly PRIORITY_LABEL: Record<string, string> = {
+    now: 'ahora',
+    plan: 'planear',
+    quick: 'rápido',
+    later: 'puede esperar',
+  };
+
+  /** Orden Eisenhower para "siguiente acción". now > plan > quick > later. */
+  private static readonly PRIORITY_RANK: Record<string, number> = {
+    now: 0,
+    plan: 1,
+    quick: 2,
+    later: 3,
+  };
+
+  private async prioritizeTasksStart(userId: string): Promise<ActionResult> {
+    const tasks = await this.store.getMicroTasks(userId);
+    const pending = tasks.filter((t) => !t.completed);
+    if (pending.length === 0) {
+      return {
+        success: true,
+        message: 'No tienes tareas pendientes. Empieza con /agenda para volcar tu día.',
+      };
+    }
+    // Solo clasificar las que no tienen prioridad. Si todas ya están, decir.
+    const unclassified = pending.filter((t) => !t.priority);
+    if (unclassified.length === 0) {
+      return {
+        success: true,
+        message:
+          'Todas tus tareas ya están clasificadas. Usa /siguiente para ver la próxima.',
+      };
+    }
+    // El draft guarda los INDICES 1-based de las tareas a clasificar (sobre
+    // el orden de getMicroTasks que es por created_at ASC). Procesamos una
+    // por una vía pendingInput → prioritize_step.
+    const indices: number[] = [];
+    tasks.forEach((t, i) => {
+      if (!t.completed && !t.priority) indices.push(i + 1);
+    });
+    await this.store.setPendingFlowDraft(userId, {
+      flow: 'eisenhower',
+      step: 1,
+      answers: [],
+      metadata: { indices: indices.join(',') },
+    });
+    const first = tasks[indices[0] - 1];
+    const total = indices.length;
+    return {
+      success: true,
+      message: this.prioritizationPrompt(first.text, 1, total),
+      pendingInput: {
+        action: 'prioritize_step',
+        paramName: 'answer',
+        prompt: '¿A, B, C o D?',
+      },
+    };
+  }
+
+  private prioritizationPrompt(taskText: string, position: number, total: number): string {
+    return [
+      `Para "${escapeMdV1(taskText)}" (${position}/${total}):`,
+      '',
+      'A) Urgente (vence hoy/mañana)',
+      'B) Importante (te acerca a una meta)',
+      'C) Ambas',
+      'D) Puede esperar',
+    ].join('\n');
+  }
+
+  private async prioritizeStep(userId: string, params: Record<string, unknown>): Promise<ActionResult> {
+    const answer = String(params.answer ?? '').trim();
+    const draft = await this.store.getPendingFlowDraft(userId);
+    if (!draft || draft.flow !== 'eisenhower') {
+      return {
+        success: false,
+        message: 'ℹ️ No hay priorización activa. Empieza con /prioriza.',
+      };
+    }
+    const indicesStr = draft.metadata?.indices ?? '';
+    const indices = indicesStr.split(',').map((n) => parseInt(n, 10)).filter((n) => Number.isFinite(n));
+    if (indices.length === 0) {
+      await this.store.clearPendingFlowDraft(userId);
+      return { success: false, message: 'ℹ️ No hay más tareas que clasificar.' };
+    }
+    // Parsear A/B/C/D (case-insensitive, tolera "a)", "A.", etc.)
+    const letter = stripAccentsLower(answer).match(/^([abcd])\b/)?.[1]
+      ?? stripAccentsLower(answer).match(/^([abcd])[\).,]/)?.[1]
+      ?? '';
+    const priorityMap: Record<string, string> = {
+      a: 'quick',  // Urgente = rápido
+      b: 'plan',   // Importante = planear
+      c: 'now',    // Ambas = ahora
+      d: 'later',  // Ni urgente ni importante = puede esperar
+    };
+    const priority = priorityMap[letter];
+    if (!priority) {
+      // No parsea: re-prompt preservando estado.
+      const tasks = await this.store.getMicroTasks(userId);
+      const currentIdx = indices[0];
+      const current = tasks[currentIdx - 1];
+      return {
+        success: false,
+        message: `⚠️ Responde con A, B, C o D.\n\n` + this.prioritizationPrompt(current.text, 1, indices.length),
+        pendingInput: {
+          action: 'prioritize_step',
+          paramName: 'answer',
+          prompt: '¿A, B, C o D?',
+        },
+      };
+    }
+    // Guardar prioridad y avanzar.
+    const currentIdx = indices.shift()!;
+    await this.store.setMicroTaskPriority(userId, currentIdx, priority);
+
+    if (indices.length === 0) {
+      // Terminó: limpiar draft e invocar nextAction para mostrar siguiente.
+      await this.store.clearPendingFlowDraft(userId);
+      const followUp = await this.nextAction(userId);
+      return {
+        success: true,
+        message: 'Listo, clasificación terminada.\n\n' + followUp.message,
+      };
+    }
+    // Siguiente tarea.
+    await this.store.setPendingFlowDraft(userId, {
+      flow: 'eisenhower',
+      step: draft.step + 1,
+      answers: [...draft.answers, letter],
+      metadata: { indices: indices.join(',') },
+    });
+    const tasks = await this.store.getMicroTasks(userId);
+    const nextTask = tasks[indices[0] - 1];
+    return {
+      success: true,
+      message: this.prioritizationPrompt(nextTask.text, draft.step + 1, draft.step + indices.length),
+      pendingInput: {
+        action: 'prioritize_step',
+        paramName: 'answer',
+        prompt: '¿A, B, C o D?',
+      },
+    };
+  }
+
+  private async nextAction(userId: string): Promise<ActionResult> {
+    const tasks = await this.store.getMicroTasks(userId);
+    const pending = tasks.filter((t) => !t.completed);
+    if (pending.length === 0) {
+      return {
+        success: true,
+        message: 'No tienes tareas pendientes. Empieza con /agenda para volcar tu día.',
+      };
+    }
+    const withPriority = pending.filter((t) => t.priority);
+    if (withPriority.length === 0) {
+      return {
+        success: true,
+        message:
+          `Tienes ${pending.length} tarea(s) sin clasificar. Pasa por /prioriza para ` +
+          'ordenarlas, o usa /focus para verlas como lista.',
+      };
+    }
+    // Elegir la de mayor rango (now > plan > quick > later); empates → más antigua.
+    const sorted = [...withPriority].sort((a, b) => {
+      const ra = AdhdCoachDomainHandler.PRIORITY_RANK[a.priority ?? 'later'] ?? 99;
+      const rb = AdhdCoachDomainHandler.PRIORITY_RANK[b.priority ?? 'later'] ?? 99;
+      return ra - rb;
+    });
+    const next = sorted[0];
+    const label = AdhdCoachDomainHandler.PRIORITY_LABEL[next.priority ?? 'later'] ?? next.priority;
+    return {
+      success: true,
+      message: [
+        'Tu siguiente acción:',
+        `"${escapeMdV1(next.text)}"`,
+        `(${label})`,
+        '',
+        '¿Cuál sería un primer paso pequeño?',
+      ].join('\n'),
+    };
   }
 
   private async neuroOrFaithOffer(userId: string): Promise<ActionResult> {

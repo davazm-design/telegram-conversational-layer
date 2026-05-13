@@ -24,9 +24,16 @@ export interface IAdhdCoachStore {
   getCheckins(userId: string): Promise<{ date: string; completed: boolean }[]>;
   addCheckin(userId: string, date: string): Promise<void>;
 
-  getMicroTasks(userId: string): Promise<{ id: string; text: string; completed: boolean }[]>;
+  getMicroTasks(userId: string): Promise<{ id: string; text: string; completed: boolean; priority?: string | null }[]>;
   addMicroTask(userId: string, text: string): Promise<void>;
   completeMicroTask(userId: string, taskId: string): Promise<boolean>;
+  /**
+   * Setea la prioridad Eisenhower de una micro-task por índice 1-based.
+   * Valores válidos: 'now' | 'plan' | 'quick' | 'later' | null (limpia).
+   * Persiste en la columna `date` de adhd_items (recicla campo unused).
+   * Devuelve el texto de la tarea o null si el índice no existe.
+   */
+  setMicroTaskPriority(userId: string, index1Based: number, priority: string | null): Promise<string | null>;
   /** Borra una micro-task por índice 1-based (sobre la lista que ve el usuario). */
   deleteMicroTaskByIndex(userId: string, index1Based: number): Promise<string | null>;
   /** Edita el texto de una micro-task por índice 1-based. Devuelve el texto anterior. */
