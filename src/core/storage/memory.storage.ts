@@ -1,30 +1,71 @@
 import { PendingInput } from '../../router/intent.router';
-import { IAdhdCoachStore, ISessionStore, IStorageProvider, ITodoStore } from './interfaces';
+import { IAdhdCoachStore, ISessionStore, IStorageProvider, ITodoStore, ListSnapshot } from './interfaces';
+import { PENDING_INPUT_TTL_MS, PENDING_ACTION_TTL_MS } from './ttl';
 
 class MemorySessionStore implements ISessionStore {
   constructor(private domainId: string) {}
-  private pendingInputs = new Map<string, PendingInput>();
-  private pendingActions = new Map<string, string>();
+  // S0.5: cada pending guarda su `expiresAt`. Al leer, si venció lo
+  // descartamos (y lo borramos del mapa para no acumular basura).
+  private pendingInputs = new Map<string, { value: PendingInput; expiresAt: number }>();
+  private pendingActions = new Map<string, { value: string; expiresAt: number }>();
+  private lastLists = new Map<string, ListSnapshot>();
   private key(userId: string) { return `${this.domainId}:${userId}`; }
 
   async getPendingInput(userId: string): Promise<PendingInput | null> {
-    return this.pendingInputs.get(this.key(userId)) ?? null;
+    const k = this.key(userId);
+    const entry = this.pendingInputs.get(k);
+    if (!entry) return null;
+    if (Date.now() > entry.expiresAt) {
+      this.pendingInputs.delete(k);
+      return null;
+    }
+    return entry.value;
   }
   async setPendingInput(userId: string, data: PendingInput): Promise<void> {
-    this.pendingInputs.set(this.key(userId), data);
+    this.pendingInputs.set(this.key(userId), {
+      value: data,
+      expiresAt: Date.now() + PENDING_INPUT_TTL_MS,
+    });
   }
   async clearPendingInput(userId: string): Promise<void> {
     this.pendingInputs.delete(this.key(userId));
   }
 
   async getPendingAction(userId: string): Promise<string | null> {
-    return this.pendingActions.get(this.key(userId)) ?? null;
+    const k = this.key(userId);
+    const entry = this.pendingActions.get(k);
+    if (!entry) return null;
+    if (Date.now() > entry.expiresAt) {
+      this.pendingActions.delete(k);
+      return null;
+    }
+    return entry.value;
   }
   async setPendingAction(userId: string, action: string): Promise<void> {
-    this.pendingActions.set(this.key(userId), action);
+    this.pendingActions.set(this.key(userId), {
+      value: action,
+      expiresAt: Date.now() + PENDING_ACTION_TTL_MS,
+    });
   }
   async clearPendingAction(userId: string): Promise<void> {
     this.pendingActions.delete(this.key(userId));
+  }
+
+  async setLastList(userId: string, snapshot: ListSnapshot): Promise<void> {
+    // Copia defensiva para que mutaciones externas no afecten el snapshot.
+    this.lastLists.set(this.key(userId), {
+      kind: snapshot.kind,
+      shownAt: snapshot.shownAt,
+      items: snapshot.items.map((i) => ({ ...i })),
+    });
+  }
+  async getLastList(userId: string): Promise<ListSnapshot | null> {
+    const s = this.lastLists.get(this.key(userId));
+    if (!s) return null;
+    return { kind: s.kind, shownAt: s.shownAt, items: s.items.map((i) => ({ ...i })) };
+  }
+  async clearLastList(userId: string): Promise<void> {
+    this.lastLists.delete(this.key(userId));
   }
 }
 
@@ -76,6 +117,9 @@ class MemoryAdhdCoachStore implements IAdhdCoachStore {
   // Fase 4: registros de "journal" agrupados por tipo.
   private journal = new Map<string, Array<{ type: string; summary: string }>>();
   private reminderSeq = 0;
+  // S0.1: counter para ids ESTABLES de microtask. Nunca se reusa, ni siquiera
+  // tras borrados — así un snapshot viejo nunca apunta a la tarea equivocada.
+  private microTaskSeq = 0;
   private key(userId: string) { return `${this.domainId}:${userId}`; }
 
   async getCheckins(userId: string) { return this.checkins.get(this.key(userId)) ?? []; }
@@ -88,7 +132,8 @@ class MemoryAdhdCoachStore implements IAdhdCoachStore {
   async getMicroTasks(userId: string) { return this.microTasks.get(this.key(userId)) ?? []; }
   async addMicroTask(userId: string, text: string) {
     const list = await this.getMicroTasks(userId);
-    list.push({ id: String(list.length + 1), text, completed: false });
+    // id ESTABLE: counter monotónico, nunca se reusa.
+    list.push({ id: String(++this.microTaskSeq), text, completed: false });
     this.microTasks.set(this.key(userId), list);
   }
   async completeMicroTask(userId: string, taskId: string) {
@@ -101,32 +146,35 @@ class MemoryAdhdCoachStore implements IAdhdCoachStore {
     return false;
   }
 
-  async deleteMicroTaskByIndex(userId: string, index1Based: number): Promise<string | null> {
+  async deleteMicroTaskById(userId: string, id: string): Promise<string | null> {
     const k = this.key(userId);
     const list = this.microTasks.get(k) ?? [];
-    if (index1Based < 1 || index1Based > list.length) return null;
-    const removed = list.splice(index1Based - 1, 1)[0];
+    const idx = list.findIndex((t) => t.id === id);
+    if (idx < 0) return null;
+    const removed = list.splice(idx, 1)[0];
     this.microTasks.set(k, list);
     return removed?.text ?? null;
   }
 
-  async editMicroTaskByIndex(userId: string, index1Based: number, newText: string): Promise<string | null> {
+  async editMicroTaskById(userId: string, id: string, newText: string): Promise<string | null> {
     const k = this.key(userId);
     const list = this.microTasks.get(k) ?? [];
-    if (index1Based < 1 || index1Based > list.length) return null;
-    const oldText = list[index1Based - 1].text;
-    list[index1Based - 1].text = newText;
+    const task = list.find((t) => t.id === id);
+    if (!task) return null;
+    const oldText = task.text;
+    task.text = newText;
     this.microTasks.set(k, list);
     return oldText;
   }
 
-  async setMicroTaskPriority(userId: string, index1Based: number, priority: string | null): Promise<string | null> {
+  async setMicroTaskPriorityById(userId: string, id: string, priority: string | null): Promise<string | null> {
     const k = this.key(userId);
     const list = this.microTasks.get(k) ?? [];
-    if (index1Based < 1 || index1Based > list.length) return null;
-    list[index1Based - 1].priority = priority;
+    const task = list.find((t) => t.id === id);
+    if (!task) return null;
+    task.priority = priority;
     this.microTasks.set(k, list);
-    return list[index1Based - 1].text;
+    return task.text;
   }
 
   async getFocusSessions(userId: string) { return this.focusSessions.get(this.key(userId)) ?? []; }
@@ -188,8 +236,12 @@ class MemoryAdhdCoachStore implements IAdhdCoachStore {
     const pending = await this.listReminders(userId);
     if (index1Based < 1 || index1Based > pending.length) return null;
     const target = pending[index1Based - 1];
+    return this.cancelReminderById(userId, target.id);
+  }
+
+  async cancelReminderById(userId: string, reminderId: string): Promise<string | null> {
     const list = this.reminders.get(this.key(userId)) ?? [];
-    const r = list.find((x) => x.id === target.id);
+    const r = list.find((x) => x.id === reminderId && !x.completed);
     if (!r) return null;
     r.completed = true;
     return r.text;

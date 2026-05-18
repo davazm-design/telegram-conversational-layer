@@ -39,7 +39,6 @@ export interface GenericResponse {
 export enum IntentSource {
   COMMAND = 'command',
   RULE = 'rule',
-  CLASSIFIER = 'classifier',
   LLM = 'llm',
   CONFIRMATION = 'confirmation',
   UNKNOWN = 'unknown',
@@ -207,27 +206,9 @@ export interface ILLMProvider {
   ): Promise<LLMIntentResult>;
 }
 
-// ─── Session ─────────────────────────────────────────────────────────────────
-
-/** A pending action awaiting user confirmation. */
-export interface PendingAction {
-  intent: ResolvedIntent;
-  /** Human-readable description of what will happen. */
-  description: string;
-  /** When this pending action was created (ISO-8601). */
-  createdAt: string;
-}
-
-/** Session state for a single user. */
-export interface UserSession {
-  userId: string;
-  /** Currently pending action awaiting confirmation. */
-  pendingAction?: PendingAction;
-  /** Arbitrary domain-specific context. */
-  context: Record<string, unknown>;
-  /** Last activity timestamp. */
-  lastActivity: string;
-}
+// S0.6: las interfaces `PendingAction` y `UserSession` se eliminaron —
+// eran dead code. El estado de sesión real vive en `ISessionStore`
+// (pending_action es un simple string; pending_input su propio tipo).
 
 // ─── Adapter ─────────────────────────────────────────────────────────────────
 

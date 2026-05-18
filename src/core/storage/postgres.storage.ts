@@ -1,6 +1,6 @@
 import { Pool } from 'pg';
 import { PendingInput } from '../../router/intent.router';
-import { IAdhdCoachStore, ISessionStore, IStorageProvider, ITodoStore } from './interfaces';
+import { IAdhdCoachStore, ISessionStore, IStorageProvider, ITodoStore, ListSnapshot } from './interfaces';
 import { logger } from '../logger';
 
 const COMPONENT = 'PostgresStorage';
@@ -9,8 +9,22 @@ class PostgresSessionStore implements ISessionStore {
   constructor(private pool: Pool, private domainId: string) {}
 
   async getPendingInput(userId: string): Promise<PendingInput | null> {
-    const res = await this.pool.query('SELECT data FROM sessions WHERE domain_id = $1 AND user_id = $2 AND type = $3', [this.domainId, userId, 'pending_input']);
+    // S0.5: TTL de 1h vía updated_at. Una fila vencida se trata como
+    // inexistente; se limpia perezosamente abajo para no dejar basura.
+    const res = await this.pool.query(
+      `SELECT data FROM sessions
+       WHERE domain_id = $1 AND user_id = $2 AND type = $3
+         AND updated_at > NOW() - INTERVAL '1 hour'`,
+      [this.domainId, userId, 'pending_input'],
+    );
     if (res.rows.length > 0) return res.rows[0].data as PendingInput;
+    // Limpieza perezosa de la fila vencida (si existía).
+    await this.pool.query(
+      `DELETE FROM sessions
+       WHERE domain_id = $1 AND user_id = $2 AND type = $3
+         AND updated_at <= NOW() - INTERVAL '1 hour'`,
+      [this.domainId, userId, 'pending_input'],
+    );
     return null;
   }
   async setPendingInput(userId: string, data: PendingInput): Promise<void> {
@@ -25,8 +39,22 @@ class PostgresSessionStore implements ISessionStore {
   }
 
   async getPendingAction(userId: string): Promise<string | null> {
-    const res = await this.pool.query('SELECT data FROM sessions WHERE domain_id = $1 AND user_id = $2 AND type = $3', [this.domainId, userId, 'pending_action']);
+    // S0.5: TTL de 5min vía updated_at. Una confirmación destructiva debe
+    // ser fresca; si venció, el usuario reconfirma.
+    const res = await this.pool.query(
+      `SELECT data FROM sessions
+       WHERE domain_id = $1 AND user_id = $2 AND type = $3
+         AND updated_at > NOW() - INTERVAL '5 minutes'`,
+      [this.domainId, userId, 'pending_action'],
+    );
     if (res.rows.length > 0) return res.rows[0].data.action as string;
+    // Limpieza perezosa de la fila vencida (si existía).
+    await this.pool.query(
+      `DELETE FROM sessions
+       WHERE domain_id = $1 AND user_id = $2 AND type = $3
+         AND updated_at <= NOW() - INTERVAL '5 minutes'`,
+      [this.domainId, userId, 'pending_action'],
+    );
     return null;
   }
   async setPendingAction(userId: string, action: string): Promise<void> {
@@ -38,6 +66,36 @@ class PostgresSessionStore implements ISessionStore {
   }
   async clearPendingAction(userId: string): Promise<void> {
     await this.pool.query('DELETE FROM sessions WHERE domain_id = $1 AND user_id = $2 AND type = $3', [this.domainId, userId, 'pending_action']);
+  }
+
+  // ── S0.1: snapshot de la última lista mostrada ───────────────────────────
+  async setLastList(userId: string, snapshot: ListSnapshot): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO sessions (domain_id, user_id, type, data) VALUES ($1, $2, $3, $4)
+       ON CONFLICT (domain_id, user_id, type) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()`,
+      [this.domainId, userId, 'last_list', JSON.stringify(snapshot)]
+    );
+  }
+  async getLastList(userId: string): Promise<ListSnapshot | null> {
+    const res = await this.pool.query(
+      'SELECT data FROM sessions WHERE domain_id = $1 AND user_id = $2 AND type = $3',
+      [this.domainId, userId, 'last_list']
+    );
+    if (res.rows.length === 0) return null;
+    const d = res.rows[0].data;
+    if (!d || typeof d.kind !== 'string' || !Array.isArray(d.items)) return null;
+    return {
+      kind: String(d.kind),
+      shownAt: String(d.shownAt ?? ''),
+      items: d.items.map((i: { position: number; refId: string; text: string }) => ({
+        position: Number(i.position),
+        refId: String(i.refId),
+        text: String(i.text ?? ''),
+      })),
+    };
+  }
+  async clearLastList(userId: string): Promise<void> {
+    await this.pool.query('DELETE FROM sessions WHERE domain_id = $1 AND user_id = $2 AND type = $3', [this.domainId, userId, 'last_list']);
   }
 }
 
@@ -81,58 +139,64 @@ class PostgresAdhdCoachStore implements IAdhdCoachStore {
   async getMicroTasks(userId: string) {
     // El campo `date` se recicla para guardar la prioridad Eisenhower
     // ('now'|'plan'|'quick'|'later'|null). Cero schema change.
+    // S0.1: `id` es el SERIAL de la fila — ESTABLE, no la posición.
     const res = await this.pool.query('SELECT id, text, completed, date FROM adhd_items WHERE domain_id = $1 AND user_id = $2 AND type = $3 ORDER BY created_at ASC', [this.domainId, userId, 'microtask']);
-    return res.rows.map((r, i) => ({
-      id: String(i + 1),
+    return res.rows.map((r) => ({
+      id: String(r.id),
       text: r.text,
       completed: r.completed,
       priority: r.date ?? null,
-      dbId: r.id,
     }));
   }
   async addMicroTask(userId: string, text: string) {
     await this.pool.query('INSERT INTO adhd_items (domain_id, user_id, type, text, completed) VALUES ($1, $2, $3, $4, false)', [this.domainId, userId, 'microtask', text]);
   }
   async completeMicroTask(userId: string, taskId: string) {
-    const tasks = await this.getMicroTasks(userId);
-    const target = tasks.find((t) => t.id === taskId);
-    if (!target) return false;
-    await this.pool.query('UPDATE adhd_items SET completed = true WHERE id = $1 AND domain_id = $2', [target.dbId, this.domainId]);
-    return true;
-  }
-
-  async deleteMicroTaskByIndex(userId: string, index1Based: number): Promise<string | null> {
-    const tasks = await this.getMicroTasks(userId);
-    if (index1Based < 1 || index1Based > tasks.length) return null;
-    const target = tasks[index1Based - 1];
-    await this.pool.query(
-      'DELETE FROM adhd_items WHERE id = $1 AND domain_id = $2',
-      [(target as { dbId: number }).dbId, this.domainId],
+    // taskId es el id estable (= SERIAL). Update directo, sin round-trip extra.
+    const res = await this.pool.query(
+      `UPDATE adhd_items SET completed = true
+       WHERE id = $1 AND domain_id = $2 AND user_id = $3 AND type = 'microtask'`,
+      [taskId, this.domainId, userId],
     );
-    return target.text;
+    return (res.rowCount ?? 0) > 0;
   }
 
-  async editMicroTaskByIndex(userId: string, index1Based: number, newText: string): Promise<string | null> {
-    const tasks = await this.getMicroTasks(userId);
-    if (index1Based < 1 || index1Based > tasks.length) return null;
-    const target = tasks[index1Based - 1];
-    const oldText = target.text;
+  async deleteMicroTaskById(userId: string, id: string): Promise<string | null> {
+    const res = await this.pool.query(
+      `DELETE FROM adhd_items
+       WHERE id = $1 AND domain_id = $2 AND user_id = $3 AND type = 'microtask'
+       RETURNING text`,
+      [id, this.domainId, userId],
+    );
+    return res.rows[0]?.text ?? null;
+  }
+
+  async editMicroTaskById(userId: string, id: string, newText: string): Promise<string | null> {
+    // SELECT del texto anterior + UPDATE. El handler usa el anterior para el
+    // mensaje "Cambiada: viejo → nuevo".
+    const prev = await this.pool.query(
+      `SELECT text FROM adhd_items
+       WHERE id = $1 AND domain_id = $2 AND user_id = $3 AND type = 'microtask'`,
+      [id, this.domainId, userId],
+    );
+    if (prev.rows.length === 0) return null;
+    const oldText = prev.rows[0].text as string;
     await this.pool.query(
-      'UPDATE adhd_items SET text = $1 WHERE id = $2 AND domain_id = $3',
-      [newText, (target as { dbId: number }).dbId, this.domainId],
+      `UPDATE adhd_items SET text = $1
+       WHERE id = $2 AND domain_id = $3 AND user_id = $4 AND type = 'microtask'`,
+      [newText, id, this.domainId, userId],
     );
     return oldText;
   }
 
-  async setMicroTaskPriority(userId: string, index1Based: number, priority: string | null): Promise<string | null> {
-    const tasks = await this.getMicroTasks(userId);
-    if (index1Based < 1 || index1Based > tasks.length) return null;
-    const target = tasks[index1Based - 1];
-    await this.pool.query(
-      'UPDATE adhd_items SET date = $1 WHERE id = $2 AND domain_id = $3',
-      [priority, (target as { dbId: number }).dbId, this.domainId],
+  async setMicroTaskPriorityById(userId: string, id: string, priority: string | null): Promise<string | null> {
+    const res = await this.pool.query(
+      `UPDATE adhd_items SET date = $1
+       WHERE id = $2 AND domain_id = $3 AND user_id = $4 AND type = 'microtask'
+       RETURNING text`,
+      [priority, id, this.domainId, userId],
     );
-    return target.text;
+    return res.rows[0]?.text ?? null;
   }
 
   async getFocusSessions(userId: string) {
@@ -209,12 +273,18 @@ class PostgresAdhdCoachStore implements IAdhdCoachStore {
   async cancelReminderByIndex(userId: string, index1Based: number): Promise<string | null> {
     const pending = await this.listReminders(userId);
     if (index1Based < 1 || index1Based > pending.length) return null;
-    const target = pending[index1Based - 1];
-    await this.pool.query(
-      `UPDATE adhd_items SET completed = true WHERE id = $1 AND domain_id = $2`,
-      [target.id, this.domainId]
+    return this.cancelReminderById(userId, pending[index1Based - 1].id);
+  }
+
+  async cancelReminderById(userId: string, reminderId: string): Promise<string | null> {
+    const res = await this.pool.query(
+      `UPDATE adhd_items SET completed = true
+       WHERE id = $1 AND domain_id = $2 AND user_id = $3
+         AND type = 'reminder' AND completed = false
+       RETURNING text`,
+      [reminderId, this.domainId, userId],
     );
-    return target.text;
+    return res.rows[0]?.text ?? null;
   }
 
   async getDueRemindersAllUsers(nowIso: string) {
@@ -417,9 +487,18 @@ export class PostgresStorageProvider implements IStorageProvider {
   adhdCoachStore!: IAdhdCoachStore;
 
   constructor(connectionString: string) {
+    // SSL: en Railway/Render hace falta `rejectUnauthorized: false` (cert
+    // self-signed del proveedor). En CI y en local con un Postgres sin SSL,
+    // forzarlo rompe la conexión. S0.2: si la URL trae `sslmode=disable` o
+    // el env `PG_SSL=false`, no usamos SSL. Resto de casos, comportamiento
+    // previo intacto. La debt 🟠 del audit (rejectUnauthorized: false
+    // global) sigue pendiente — esto es solo el primer paso.
+    const noSsl =
+      /[?&]sslmode=disable\b/i.test(connectionString) ||
+      process.env.PG_SSL === 'false';
     this.pool = new Pool({
       connectionString,
-      ssl: { rejectUnauthorized: false } // Needed for Railway/Render generally
+      ssl: noSsl ? false : { rejectUnauthorized: false },
     });
   }
 
@@ -472,6 +551,18 @@ export class PostgresStorageProvider implements IStorageProvider {
         completed BOOLEAN DEFAULT false,
         created_at TIMESTAMP DEFAULT NOW()
       );
+
+      -- S0.4: índices secundarios. Sin esto, cada query es full scan y el
+      -- tick proactivo (getDueRemindersAllUsers, cada 60s) degrada conforme
+      -- se acumulan items. IF NOT EXISTS → idempotente, seguro re-ejecutar.
+      CREATE INDEX IF NOT EXISTS idx_todo_items_lookup
+        ON todo_items (domain_id, user_id, type);
+      CREATE INDEX IF NOT EXISTS idx_adhd_items_lookup
+        ON adhd_items (domain_id, user_id, type);
+      -- Índice parcial: exacto para el tick — solo recordatorios pendientes.
+      CREATE INDEX IF NOT EXISTS idx_adhd_reminders_due
+        ON adhd_items (domain_id, date)
+        WHERE type = 'reminder' AND completed = false;
     `;
     await this.pool.query(query);
   }

@@ -24,7 +24,7 @@ import {
   RulePattern,
 } from '../core/types';
 
-import { IAdhdCoachStore } from '../core/storage/interfaces';
+import { IAdhdCoachStore, ISessionStore, ListSnapshot } from '../core/storage/interfaces';
 
 // ─── Heurística ligera de clasificación de tareas ────────────────────────────
 // Keyword-based, sin NLP. Mismo criterio que el MVP conceptual.
@@ -853,7 +853,47 @@ export function escapeMdV1(s: string): string {
 export class AdhdCoachDomainHandler implements IDomainHandler {
   readonly domainName = 'ADHD Coach';
 
-  constructor(private store: IAdhdCoachStore) {}
+  // `sessionStore` es opcional para no romper construcciones existentes (ej.
+  // tests viejos). Si está presente, habilita el snapshot de lista de S0.1:
+  // resolver "borra N" contra lo que el usuario REALMENTE vio.
+  constructor(
+    private store: IAdhdCoachStore,
+    private sessionStore?: ISessionStore,
+  ) {}
+
+  // ── S0.1: helpers de snapshot de lista ─────────────────────────────────
+
+  /** Guarda en sesión la lista numerada que se acaba de mostrar al usuario. */
+  private async saveListSnapshot(
+    userId: string,
+    kind: string,
+    items: Array<{ refId: string; text: string }>,
+  ): Promise<void> {
+    if (!this.sessionStore) return;
+    const snapshot: ListSnapshot = {
+      kind,
+      shownAt: new Date().toISOString(),
+      items: items.map((it, i) => ({ position: i + 1, refId: it.refId, text: it.text })),
+    };
+    await this.sessionStore.setLastList(userId, snapshot);
+  }
+
+  /**
+   * Resuelve un índice 1-based contra el snapshot de la última lista mostrada.
+   * Devuelve `{ kind, refId, text }` o null si no hay snapshot / índice fuera
+   * de rango. NO valida que el item siga existiendo (eso lo hace el handler).
+   */
+  private async resolveFromSnapshot(
+    userId: string,
+    index1Based: number,
+  ): Promise<{ kind: string; refId: string; text: string } | null> {
+    if (!this.sessionStore) return null;
+    const snap = await this.sessionStore.getLastList(userId);
+    if (!snap) return null;
+    const item = snap.items.find((i) => i.position === index1Based);
+    if (!item) return null;
+    return { kind: snap.kind, refId: item.refId, text: item.text };
+  }
 
   getCapabilities(): Capability[] {
     return [
@@ -1867,6 +1907,12 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
       lines.push('', `_${pendingTasks.length} pendiente(s). Escribe "listo 1" para completar._`);
     }
 
+    // S0.1: snapshot — el #N que el usuario ve mapea a este id estable.
+    await this.saveListSnapshot(
+      userId,
+      'microtasks',
+      tasks.map((t) => ({ refId: t.id, text: t.text })),
+    );
     return { success: true, message: lines.join('\n') };
   }
 
@@ -1893,28 +1939,42 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
   }
 
   private async completeMicroTask(userId: string, params: Record<string, unknown>): Promise<ActionResult> {
-    const taskId = String(params.taskId ?? '').trim();
+    const position = parseInt(String(params.taskId ?? '').trim(), 10);
+    if (!Number.isFinite(position) || position < 1) {
+      return { success: false, message: '⚠️ Necesito un número. Ej: "listo 1". Escribe /focus para ver la lista.' };
+    }
     const tasks = await this.store.getMicroTasks(userId);
 
-    const index = parseInt(taskId, 10) - 1;
-    const task = (index >= 0 && index < tasks.length) ? tasks[index] : null;
-
-    if (!task) {
-      return { success: false, message: `⚠️ No encontré la micro-tarea #${taskId}. Escribe /focus para ver la lista.` };
+    // S0.1: resolver la posición contra el snapshot de microtasks. Si el
+    // snapshot es de otro tipo o no existe, fallback a la posición actual.
+    let task: { id: string; text: string; completed: boolean } | null = null;
+    const snap = await this.resolveFromSnapshot(userId, position);
+    if (snap && snap.kind === 'microtasks') {
+      task = tasks.find((t) => t.id === snap.refId) ?? null;
+      if (!task) {
+        return {
+          success: false,
+          message: `⚠️ La micro-tarea "${escapeMdV1(snap.text)}" ya no está. Mira la lista con /focus.`,
+        };
+      }
+    } else {
+      task = (position >= 1 && position <= tasks.length) ? tasks[position - 1] : null;
     }
 
+    if (!task) {
+      return { success: false, message: `⚠️ No encontré la micro-tarea #${position}. Escribe /focus para ver la lista.` };
+    }
     if (task.completed) {
-      return { success: true, message: `ℹ️ La micro-tarea "${task.text}" ya estaba completada.` };
+      return { success: true, message: `ℹ️ La micro-tarea "${escapeMdV1(task.text)}" ya estaba completada.` };
     }
 
     await this.store.completeMicroTask(userId, task.id);
     const remaining = tasks.filter((t) => !t.completed).length - 1;
 
     if (remaining <= 0) {
-      return { success: true, message: `🎉 ¡Completaste "${task.text}"! *¡Todas las micro-tareas están hechas!* 🏆` };
+      return { success: true, message: `🎉 ¡Completaste "${escapeMdV1(task.text)}"! *¡Todas las micro-tareas están hechas!* 🏆` };
     }
-
-    return { success: true, message: `✅ ¡Completada! "${task.text}"\n\n📋 Quedan ${remaining} micro-tarea(s). ¡Sigue así!` };
+    return { success: true, message: `✅ ¡Completada! "${escapeMdV1(task.text)}"\n\n📋 Quedan ${remaining} micro-tarea(s). ¡Sigue así!` };
   }
 
   private async resetDay(userId: string): Promise<ActionResult> {
@@ -1929,66 +1989,128 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
     if (!raw) {
       return { success: false, message: '⚠️ Necesito uno o más números. Ej: /borrar 3 o /borrar 1, 2, 4. Mira la lista con /focus.' };
     }
-    const indices = raw
+    const positions = raw
       .split(/[,\s]+|\s+y\s+/i)
       .map((s) => parseInt(s, 10))
       .filter((n) => Number.isFinite(n) && n >= 1);
-    if (indices.length === 0) {
+    if (positions.length === 0) {
       return { success: false, message: '⚠️ No encontré números válidos. Ej: /borrar 1, 2, 4.' };
     }
-    // ── Inferencia de contexto ─────────────────────────────────────────
-    // Si el usuario tipea "Borra N" o "Cancela N" SIN sustantivo y no
-    // tiene microtasks pero SÍ recordatorios, ejecutamos cancel_reminder
-    // directamente. Esto es lo que un humano espera: "estaba viendo
-    // recordatorios, no me hagas adivinar el comando exacto".
-    const allMicroTasks = await this.store.getMicroTasks(userId);
-    const reminders = await this.store.listReminders(userId);
-    if (allMicroTasks.length === 0 && reminders.length > 0) {
-      // Delegar a cancelReminder; el usuario claramente quería esto.
+
+    // ── S0.1: resolución por snapshot ──────────────────────────────────
+    // Si el usuario acaba de ver una lista (/recordatorios o /focus), el
+    // snapshot dice exactamente qué item corresponde a cada número Y de
+    // qué TIPO es. Eso elimina el bug de "borré la cosa equivocada":
+    //   - snapshot.kind === 'reminders' → cancela recordatorios.
+    //   - snapshot.kind === 'microtasks' → borra microtasks.
+    const firstSnap = await this.resolveFromSnapshot(userId, positions[0]);
+    if (firstSnap && firstSnap.kind === 'reminders') {
+      // El usuario estaba viendo recordatorios — delega a cancelReminder,
+      // que también resuelve por snapshot. Coherente con lo que vio.
       return this.cancelReminder(userId, { index: raw });
     }
 
-    // CRÍTICO: borrar de mayor a menor para que los índices restantes no
-    // cambien durante la operación.
-    const sorted = Array.from(new Set(indices)).sort((a, b) => b - a);
+    // Inferencia sin snapshot: si no hay microtasks pero SÍ recordatorios,
+    // el usuario claramente quería cancelar recordatorios.
+    if (!firstSnap) {
+      const allMicroTasks = await this.store.getMicroTasks(userId);
+      const reminders = await this.store.listReminders(userId);
+      if (allMicroTasks.length === 0 && reminders.length > 0) {
+        return this.cancelReminder(userId, { index: raw });
+      }
+    }
+
+    // Borrado de microtasks. PASO 1: resolvemos TODAS las posiciones a su id
+    // estable ANTES de borrar nada. Crítico: borrar muta la lista, así que
+    // resolver-mientras-borras corrompe las posiciones siguientes (bug que
+    // partía "/borrar 1, 3" borrando 1 y 2). Copiamos la lista por si el
+    // store devuelve la referencia viva.
+    const tasks = [...await this.store.getMicroTasks(userId)];
     const removed: string[] = [];
     const notFound: number[] = [];
-    for (const i of sorted) {
-      const text = await this.store.deleteMicroTaskByIndex(userId, i);
-      if (text) removed.unshift(text);
-      else notFound.push(i);
+    const stale: string[] = [];
+    const targets: Array<{ pos: number; id: string; snapText?: string }> = [];
+    for (const pos of Array.from(new Set(positions))) {
+      const snap = await this.resolveFromSnapshot(userId, pos);
+      if (snap && snap.kind === 'microtasks') {
+        targets.push({ pos, id: snap.refId, snapText: snap.text });
+      } else if (!snap && pos >= 1 && pos <= tasks.length) {
+        // fallback sin snapshot: posición contra lista actual.
+        targets.push({ pos, id: tasks[pos - 1].id });
+      } else {
+        notFound.push(pos);
+      }
     }
+    // PASO 2: borrar por id estable. El orden ya no importa.
+    for (const t of targets) {
+      const text = await this.store.deleteMicroTaskById(userId, t.id);
+      if (text) removed.push(text);
+      else stale.push(t.snapText ?? `#${t.pos}`); // estaba en el snapshot pero ya no existe
+    }
+
     if (removed.length === 0) {
-      const baseMsg = `⚠️ No encontré las micro-tareas: ${notFound.sort((a, b) => a - b).join(', ')}. Revisa /focus.`;
-      return { success: false, message: baseMsg };
+      const parts: string[] = [];
+      if (notFound.length) parts.push(`no encontré: ${notFound.sort((a, b) => a - b).join(', ')}`);
+      if (stale.length) parts.push(`ya no existían: ${stale.map(escapeMdV1).join(', ')}`);
+      return {
+        success: false,
+        message: `⚠️ No borré nada — ${parts.join('; ')}. Mira la lista actual con /focus.`,
+      };
     }
     const escaped = removed.map((t) => `"${escapeMdV1(t)}"`).join(', ');
     let msg = removed.length === 1
-      ? `🗑️ Borrada: ${escaped}.`
-      : `🗑️ Borradas (${removed.length}): ${escaped}.`;
-    if (notFound.length > 0) {
-      msg += `\n⚠️ No encontré: ${notFound.sort((a, b) => a - b).join(', ')}.`;
-    }
+      ? `🗑️ Borrada: ${escaped} (micro-tarea).`
+      : `🗑️ Borradas (${removed.length}): ${escaped} (micro-tareas).`;
+    if (notFound.length) msg += `\n⚠️ No encontré: ${notFound.sort((a, b) => a - b).join(', ')}.`;
+    if (stale.length) msg += `\n⚠️ Ya no existían: ${stale.map(escapeMdV1).join(', ')}.`;
+    // El snapshot quedó stale tras borrar — limpiarlo evita resoluciones raras.
+    if (this.sessionStore) await this.sessionStore.clearLastList(userId);
     return { success: true, message: msg };
   }
 
   private async editMicroTask(userId: string, params: Record<string, unknown>): Promise<ActionResult> {
-    const idx = parseInt(String(params.index ?? ''), 10);
+    const pos = parseInt(String(params.index ?? ''), 10);
     const newText = String(params.text ?? '').trim();
-    if (!Number.isFinite(idx) || idx < 1) {
+    if (!Number.isFinite(pos) || pos < 1) {
       return { success: false, message: '⚠️ Necesito un número. Ej: /editar 3 nuevo texto.' };
     }
     if (!newText) {
       return { success: false, message: '⚠️ Necesito el nuevo texto. Ej: /editar 3 llamar al doctor.' };
     }
     const flatten = newText.replace(/[\r\n]+/g, ' ').replace(/\s{2,}/g, ' ').trim();
-    const oldText = await this.store.editMicroTaskByIndex(userId, idx, flatten);
-    if (oldText === null) {
-      return { success: false, message: `⚠️ No encontré la micro-tarea #${idx}. Revisa /focus.` };
+
+    // S0.1: resolver la posición a id estable vía snapshot. Si el snapshot
+    // es de recordatorios, editar no aplica (no hay edit_reminder todavía).
+    const snap = await this.resolveFromSnapshot(userId, pos);
+    if (snap && snap.kind === 'reminders') {
+      return {
+        success: false,
+        message:
+          'ℹ️ Editar recordatorios todavía no está disponible. Puedes cancelarlo ' +
+          `("cancela el recordatorio ${pos}") y crear uno nuevo con /recordar.`,
+      };
     }
+    let targetId: string | null = null;
+    if (snap && snap.kind === 'microtasks') {
+      targetId = snap.refId;
+    } else if (!snap) {
+      const tasks = await this.store.getMicroTasks(userId);
+      if (pos >= 1 && pos <= tasks.length) targetId = tasks[pos - 1].id;
+    }
+    if (!targetId) {
+      return { success: false, message: `⚠️ No encontré la micro-tarea #${pos}. Revisa /focus.` };
+    }
+    const oldText = await this.store.editMicroTaskById(userId, targetId, flatten);
+    if (oldText === null) {
+      return {
+        success: false,
+        message: `⚠️ La micro-tarea #${pos} ya no está. Mira la lista actual con /focus.`,
+      };
+    }
+    if (this.sessionStore) await this.sessionStore.clearLastList(userId);
     return {
       success: true,
-      message: `✏️ Cambiada #${idx}: "${escapeMdV1(oldText)}" → "${escapeMdV1(flatten)}".`,
+      message: `✏️ Cambiada #${pos}: "${escapeMdV1(oldText)}" → "${escapeMdV1(flatten)}".`,
     };
   }
 
@@ -2388,12 +2510,18 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
         };
       }
       const lines: string[] = ['Tus recordatorios pendientes:'];
+      const snapItems: Array<{ refId: string; text: string }> = [];
       list.forEach((r, i) => {
         const rawText = (r?.text && String(r.text).trim()) ? String(r.text).trim() : '(sin texto)';
         const safeText = escapeMdV1(rawText);
         const when = formatLocalDateTime(r?.dueAt);
         lines.push(`${i + 1}. ${safeText} — ${when}`);
+        snapItems.push({ refId: String(r.id), text: rawText });
       });
+      // S0.1: guardamos el snapshot de esta lista para que "/borrar N",
+      // "/cancelar_recordatorio N", etc. se resuelvan contra lo que el
+      // usuario REALMENTE vio (refIds estables), no contra posiciones.
+      await this.saveListSnapshot(userId, 'reminders', snapItems);
       return { success: true, message: lines.join('\n') };
     } catch (err) {
       // No relanzamos para no caer al "Ocurrio un error inesperado" generico;
@@ -2426,30 +2554,56 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
         message: '⚠️ No encontré números válidos. Ej: /cancelar_recordatorio 1, 2, 4.',
       };
     }
-    // CRÍTICO: cancelar de mayor a menor para que los índices restantes no
-    // cambien durante la operación (cancelReminderByIndex re-indexa).
-    const sorted = Array.from(new Set(indices)).sort((a, b) => b - a);
+
+    // ── S0.1: resolución por snapshot ──────────────────────────────────
+    // Cada posición se resuelve a un id ESTABLE de recordatorio:
+    //   - Si hay snapshot de 'reminders', usamos su refId (lo que el
+    //     usuario REALMENTE vio).
+    //   - Si no hay snapshot de recordatorios, caemos a posición contra
+    //     la lista actual (capturada una sola vez aquí arriba).
+    // Como cancelamos por id estable, NO hay problema de re-indexado al
+    // borrar varios en una sola llamada.
+    const reminders = await this.store.listReminders(userId);
     const cancelled: string[] = [];
     const notFound: number[] = [];
-    for (const i of sorted) {
-      const text = await this.store.cancelReminderByIndex(userId, i);
-      if (text) cancelled.unshift(text); // unshift para preservar orden ascendente
-      else notFound.push(i);
+    const stale: string[] = [];
+    for (const pos of Array.from(new Set(indices))) {
+      const snap = await this.resolveFromSnapshot(userId, pos);
+      let text: string | null = null;
+      if (snap && snap.kind === 'reminders') {
+        text = await this.store.cancelReminderById(userId, snap.refId);
+        if (!text) { stale.push(snap.text); continue; }
+      } else {
+        // sin snapshot de recordatorios → posición contra lista actual.
+        if (pos >= 1 && pos <= reminders.length) {
+          text = await this.store.cancelReminderById(userId, String(reminders[pos - 1].id));
+        }
+        if (!text) { notFound.push(pos); continue; }
+      }
+      if (text) cancelled.push(text);
     }
+
     if (cancelled.length === 0) {
+      const parts: string[] = [];
+      if (notFound.length) parts.push(`no encontré: ${notFound.sort((a, b) => a - b).join(', ')}`);
+      if (stale.length) parts.push(`ya no existían: ${stale.map(escapeMdV1).join(', ')}`);
       return {
         success: false,
-        message: `⚠️ No encontré los recordatorios: ${notFound.sort((a, b) => a - b).join(', ')}. ` +
-          'Revisa la lista con /recordatorios.',
+        message: `⚠️ No cancelé nada — ${parts.join('; ')}. Revisa la lista con /recordatorios.`,
       };
     }
     const escaped = cancelled.map((t) => `"${escapeMdV1(t)}"`).join(', ');
     let msg = cancelled.length === 1
-      ? `🗑️ Cancelado: ${escaped}.`
-      : `🗑️ Cancelados (${cancelled.length}): ${escaped}.`;
+      ? `🗑️ Cancelado: ${escaped} (recordatorio).`
+      : `🗑️ Cancelados (${cancelled.length}): ${escaped} (recordatorios).`;
     if (notFound.length > 0) {
       msg += `\n⚠️ No encontré: ${notFound.sort((a, b) => a - b).join(', ')}.`;
     }
+    if (stale.length > 0) {
+      msg += `\n⚠️ Ya no existían: ${stale.map(escapeMdV1).join(', ')}.`;
+    }
+    // El snapshot quedó stale tras cancelar — limpiarlo evita resoluciones raras.
+    if (this.sessionStore) await this.sessionStore.clearLastList(userId);
     return { success: true, message: msg };
   }
 
@@ -3067,21 +3221,19 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
           'Todas tus tareas ya están clasificadas. Usa /siguiente para ver la próxima.',
       };
     }
-    // El draft guarda los INDICES 1-based de las tareas a clasificar (sobre
-    // el orden de getMicroTasks que es por created_at ASC). Procesamos una
-    // por una vía pendingInput → prioritize_step.
-    const indices: number[] = [];
-    tasks.forEach((t, i) => {
-      if (!t.completed && !t.priority) indices.push(i + 1);
-    });
+    // S0.1: el draft guarda los IDs ESTABLES de las tareas a clasificar (no
+    // índices de posición — esos se corrompen si el usuario agrega/borra una
+    // tarea a mitad del flujo). Procesamos una por una vía pendingInput →
+    // prioritize_step.
+    const ids = unclassified.map((t) => t.id);
     await this.store.setPendingFlowDraft(userId, {
       flow: 'eisenhower',
       step: 1,
       answers: [],
-      metadata: { indices: indices.join(',') },
+      metadata: { ids: ids.join(',') },
     });
-    const first = tasks[indices[0] - 1];
-    const total = indices.length;
+    const first = unclassified[0];
+    const total = ids.length;
     return {
       success: true,
       message: this.prioritizationPrompt(first.text, 1, total),
@@ -3113,9 +3265,16 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
         message: 'ℹ️ No hay priorización activa. Empieza con /prioriza.',
       };
     }
-    const indicesStr = draft.metadata?.indices ?? '';
-    const indices = indicesStr.split(',').map((n) => parseInt(n, 10)).filter((n) => Number.isFinite(n));
-    if (indices.length === 0) {
+    // S0.1: el draft guarda IDs estables. Filtramos a los que TODAVÍA
+    // existen — si el usuario borró una tarea a mitad del flujo, la
+    // saltamos sin corromper el resto.
+    const idsStr = draft.metadata?.ids ?? '';
+    const allTasksNow = await this.store.getMicroTasks(userId);
+    const ids = idsStr
+      .split(',')
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0 && allTasksNow.some((t) => t.id === s));
+    if (ids.length === 0) {
       await this.store.clearPendingFlowDraft(userId);
       return { success: false, message: 'ℹ️ No hay más tareas que clasificar.' };
     }
@@ -3132,12 +3291,11 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
     const priority = priorityMap[letter];
     if (!priority) {
       // No parsea: re-prompt preservando estado.
-      const tasks = await this.store.getMicroTasks(userId);
-      const currentIdx = indices[0];
-      const current = tasks[currentIdx - 1];
+      const current = allTasksNow.find((t) => t.id === ids[0]);
       return {
         success: false,
-        message: `⚠️ Responde con A, B, C o D.\n\n` + this.prioritizationPrompt(current.text, 1, indices.length),
+        message: `⚠️ Responde con A, B, C o D.\n\n` +
+          this.prioritizationPrompt(current?.text ?? '(tarea)', 1, ids.length),
         pendingInput: {
           action: 'prioritize_step',
           paramName: 'answer',
@@ -3145,11 +3303,11 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
         },
       };
     }
-    // Guardar prioridad y avanzar.
-    const currentIdx = indices.shift()!;
-    await this.store.setMicroTaskPriority(userId, currentIdx, priority);
+    // Guardar prioridad y avanzar — por id estable.
+    const currentId = ids.shift()!;
+    await this.store.setMicroTaskPriorityById(userId, currentId, priority);
 
-    if (indices.length === 0) {
+    if (ids.length === 0) {
       // Terminó: limpiar draft e invocar nextAction para mostrar siguiente.
       await this.store.clearPendingFlowDraft(userId);
       const followUp = await this.nextAction(userId);
@@ -3163,13 +3321,12 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
       flow: 'eisenhower',
       step: draft.step + 1,
       answers: [...draft.answers, letter],
-      metadata: { indices: indices.join(',') },
+      metadata: { ids: ids.join(',') },
     });
-    const tasks = await this.store.getMicroTasks(userId);
-    const nextTask = tasks[indices[0] - 1];
+    const nextTask = allTasksNow.find((t) => t.id === ids[0]);
     return {
       success: true,
-      message: this.prioritizationPrompt(nextTask.text, draft.step + 1, draft.step + indices.length),
+      message: this.prioritizationPrompt(nextTask?.text ?? '(tarea)', draft.step + 1, draft.step + ids.length),
       pendingInput: {
         action: 'prioritize_step',
         paramName: 'answer',

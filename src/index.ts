@@ -334,7 +334,8 @@ export function getDomainRegistry(storage: IStorageProvider): Record<string, () 
     },
     'adhd-coach': () => {
       const { AdhdCoachDomainHandler } = require('./examples/adhd-coach.domain');
-      return new AdhdCoachDomainHandler(storage.adhdCoachStore);
+      // sessionStore inyectado → habilita el snapshot de lista (S0.1).
+      return new AdhdCoachDomainHandler(storage.adhdCoachStore, storage.sessionStore);
     },
   };
 }

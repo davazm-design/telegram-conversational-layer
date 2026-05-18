@@ -1,0 +1,65 @@
+name: CI
+
+# S0.2 — CI con Postgres REAL.
+#
+# Por qué: el audit notó que MemoryStorage es el path feliz y el SQL real
+# nunca corría en CI. "Verificado" solo significa algo si el path que va a
+# producción se ejecutó. Este workflow levanta un Postgres como service
+# container y corre dos suites:
+#
+#   1) jest (todas las suites con MemoryStorage) — rápido, gate por defecto.
+#   2) jest test/postgres.storage.test.ts — contra Postgres real. Si esto
+#      falla, no se debe deployar.
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch: {}
+
+jobs:
+  test:
+    name: build + tests (memory + postgres)
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_DB: compas_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      # Sin SSL — es un contenedor local. El provider de prod tiene
+      # ssl: { rejectUnauthorized: false } como deuda 🟠 conocida.
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/compas_test?sslmode=disable
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install
+        run: npm ci
+
+      - name: TypeScript compile
+        run: npm run build
+
+      - name: Unit + integration tests (memory storage)
+        run: npm test
+
+      - name: Postgres storage contract tests
+        run: npx jest --verbose test/postgres.storage.test.ts

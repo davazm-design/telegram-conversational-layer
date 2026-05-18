@@ -3,7 +3,7 @@
  */
 
 import { ResolvedIntent } from './types';
-import { ISessionStore } from './storage/interfaces';
+import { ISessionStore, ListSnapshot } from './storage/interfaces';
 import { logger } from './logger';
 
 const COMPONENT = 'SessionManager';
@@ -65,5 +65,22 @@ export class SessionManager {
     if (key === 'pending_input') {
       await this.store.clearPendingInput(userId);
     }
+  }
+
+  // ── S0.1: snapshot de la última lista numerada mostrada ──────────────────
+  // Métodos explícitos (no el setContext genérico, que solo soporta
+  // 'pending_input' — deuda 🟡 conocida, documentada en CLAUDE.md).
+
+  /** Guarda el snapshot de la lista que el usuario acaba de ver. */
+  async setLastList(userId: string, snapshot: ListSnapshot): Promise<void> {
+    await this.store.setLastList(userId, snapshot);
+  }
+  /** Recupera el snapshot de la última lista mostrada. null si no hay. */
+  async getLastList(userId: string): Promise<ListSnapshot | null> {
+    return this.store.getLastList(userId);
+  }
+  /** Limpia el snapshot. */
+  async clearLastList(userId: string): Promise<void> {
+    await this.store.clearLastList(userId);
   }
 }

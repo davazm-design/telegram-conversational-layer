@@ -32,6 +32,22 @@ class A implements IMessageAdapter {
   reset() { this.sent = []; }
 }
 
+/**
+ * S0.1: helper — fija prioridad por POSICIÓN 1-based resolviendo el id
+ * estable. Antes la API era posicional (setMicroTaskPriority(idx)); ahora
+ * es por id estable. Los tests siguen razonando en posiciones, así que
+ * traducimos aquí.
+ */
+async function setPriorityByPos(
+  store: MemoryStorageProvider['adhdCoachStore'],
+  uid: string,
+  pos: number,
+  priority: string,
+) {
+  const tasks = await store.getMicroTasks(uid);
+  await store.setMicroTaskPriorityById(uid, tasks[pos - 1].id, priority);
+}
+
 const cfg: AppConfig = {
   telegram: { botToken: 'x', mode: 'polling', webhookSecret: '', publicWebhookUrl: '', port: 0 },
   llm: { enabled: false, provider: 'openai', openaiApiKey: '' },
@@ -98,7 +114,7 @@ describe('Fase 4.3 — Eisenhower (/prioriza, /siguiente)', () => {
   // 3) /prioriza con todas ya clasificadas
   test('3) /prioriza con todas ya clasificadas → invita a /siguiente', async () => {
     await storage.adhdCoachStore.addMicroTask(user, 'a');
-    await storage.adhdCoachStore.setMicroTaskPriority(user, 1, 'now');
+    await setPriorityByPos(storage.adhdCoachStore, user, 1, 'now');
     adapter.reset();
     await adapter.s('/prioriza');
     expect(adapter.last()).toMatch(/todas.*clasificadas|usa \/siguiente/i);
@@ -110,10 +126,10 @@ describe('Fase 4.3 — Eisenhower (/prioriza, /siguiente)', () => {
     await storage.adhdCoachStore.addMicroTask(user, 'rápido');
     await storage.adhdCoachStore.addMicroTask(user, 'ahora');
     await storage.adhdCoachStore.addMicroTask(user, 'planear');
-    await storage.adhdCoachStore.setMicroTaskPriority(user, 1, 'later');
-    await storage.adhdCoachStore.setMicroTaskPriority(user, 2, 'quick');
-    await storage.adhdCoachStore.setMicroTaskPriority(user, 3, 'now');
-    await storage.adhdCoachStore.setMicroTaskPriority(user, 4, 'plan');
+    await setPriorityByPos(storage.adhdCoachStore, user, 1, 'later');
+    await setPriorityByPos(storage.adhdCoachStore, user, 2, 'quick');
+    await setPriorityByPos(storage.adhdCoachStore, user, 3, 'now');
+    await setPriorityByPos(storage.adhdCoachStore, user, 4, 'plan');
     adapter.reset();
     await adapter.s('/siguiente');
     expect(adapter.last()).toMatch(/tu siguiente acci[óo]n/i);
@@ -139,8 +155,8 @@ describe('Fase 4.3 — Eisenhower (/prioriza, /siguiente)', () => {
   test('7) /focus con prioridades destaca "Siguiente"', async () => {
     await storage.adhdCoachStore.addMicroTask(user, 'A');
     await storage.adhdCoachStore.addMicroTask(user, 'B');
-    await storage.adhdCoachStore.setMicroTaskPriority(user, 1, 'plan');
-    await storage.adhdCoachStore.setMicroTaskPriority(user, 2, 'now');
+    await setPriorityByPos(storage.adhdCoachStore, user, 1, 'plan');
+    await setPriorityByPos(storage.adhdCoachStore, user, 2, 'now');
     adapter.reset();
     await adapter.s('/focus');
     const r = adapter.last();
@@ -169,7 +185,7 @@ describe('Fase 4.3 — Eisenhower (/prioriza, /siguiente)', () => {
   // 10) NL "qué tengo que hacer ahora"
   test('10) NL "qué tengo que hacer ahora" → /siguiente', async () => {
     await storage.adhdCoachStore.addMicroTask(user, 'algo');
-    await storage.adhdCoachStore.setMicroTaskPriority(user, 1, 'now');
+    await setPriorityByPos(storage.adhdCoachStore, user, 1, 'now');
     adapter.reset();
     await adapter.s('qué tengo que hacer ahora');
     expect(adapter.last()).toMatch(/tu siguiente acci[óo]n/i);
@@ -179,7 +195,7 @@ describe('Fase 4.3 — Eisenhower (/prioriza, /siguiente)', () => {
   test('11) /borrar N respeta prioridades existentes', async () => {
     await storage.adhdCoachStore.addMicroTask(user, 'A');
     await storage.adhdCoachStore.addMicroTask(user, 'B');
-    await storage.adhdCoachStore.setMicroTaskPriority(user, 1, 'now');
+    await setPriorityByPos(storage.adhdCoachStore, user, 1, 'now');
     adapter.reset();
     await adapter.s('/borrar 1');
     expect(adapter.last()).toMatch(/Borrada.*A/i);
@@ -191,7 +207,7 @@ describe('Fase 4.3 — Eisenhower (/prioriza, /siguiente)', () => {
   // 12) setMicroTaskPriority persiste
   test('12) setMicroTaskPriority persiste y getMicroTasks lo devuelve', async () => {
     await storage.adhdCoachStore.addMicroTask(user, 'tarea');
-    await storage.adhdCoachStore.setMicroTaskPriority(user, 1, 'now');
+    await setPriorityByPos(storage.adhdCoachStore, user, 1, 'now');
     const tasks = await storage.adhdCoachStore.getMicroTasks(user);
     expect(tasks[0].priority).toBe('now');
   });
@@ -225,7 +241,7 @@ describe('Fase 4.3 — Eisenhower (/prioriza, /siguiente)', () => {
     await storage.adhdCoachStore.addMicroTask(user, 'A');
     await storage.adhdCoachStore.addMicroTask(user, 'B');
     await storage.adhdCoachStore.addMicroTask(user, 'C');
-    await storage.adhdCoachStore.setMicroTaskPriority(user, 2, 'now');
+    await setPriorityByPos(storage.adhdCoachStore, user, 2, 'now');
     adapter.reset();
     await adapter.s('/prioriza');
     // Debe mostrar tarea A (1/2) — solo A y C sin clasificar
