@@ -63,11 +63,59 @@
 - `/borrar N` opera sobre microtasks; `/cancelar_recordatorio N` sobre
   recordatorios. Si el usuario tiene ambos tipos y dice "borra 1" mirando
   `/recordatorios`, el bot borra la microtask equivocada y confirma éxito
-  falso. Causa raíz: dos modelos, dos verbos, cero memoria de contexto.
-  Necesita decisión de diseño (unificar modelo + confirmar antes de borrar).
+  falso. **Cerrado en Sprint 0 (S0.1, commit `129962f`).**
+
+## Sprint 0.5 — cerrado — clase de bug: "pending_input ignorado"
+
+Detectado en producción (18 May 2026). El bot pregunta algo en su copy
+y luego no consume la respuesta — el `pending_input` o no se setea, o
+existe pero el parser estricto lo tira al piso, y el siguiente mensaje
+del usuario cae al menú genérico de ayuda. Desde el usuario: "el bot me
+faltó al respeto a la cara".
+
+**Audit completo encontró 6 instancias:**
+
+| Handler | Slash | Tipo |
+|---|---|---|
+| `antiAbandono` | `/abandonar` | Fachada completa |
+| `restartNoGuilt` | `/reinicio` | Fachada completa |
+| cola de `nextAction` | `/siguiente`, cola `/prioriza` | Tail fachada |
+| `christianPrayer` | `/oracion` | Tail fachada |
+| `christianDevotional` | `/devocional` | Tail fachada |
+| cola de `microActionFromAvoidance` | post `/procrastinacion` | Tail fachada (A/B/C/D huérfanas) |
+
+**Reglas de diseño impuestas** (ver `docs/contracts/sprint-0.5-pending-input.md`):
+
+1. Una pregunta a la vez. Si hay diagnóstico + acción → dos turnos.
+2. `pendingInput` o no preguntes. Si el handler termina con "?", DEBE
+   devolver `pendingInput` con la acción que consume la respuesta.
+3. Parser dual: respuesta natural (palabra) Y letra.
+4. Re-prompt preservando estado si no parsea — nunca caer al fallback.
+5. TTL como salvavidas (1h S0.5 input / 5min S0.5 action), no como
+   herramienta de limpieza.
+6. Ramificar (no descartar) info semántica útil: marcadores de tiempo en
+   la respuesta → ofrecer recordatorio.
+
+**Implementación:** los 6 handlers reescritos. `/abandonar` y `/reinicio`
+ahora son flujos multi-paso reales (2 y 3 turnos). Las colas de
+`/prioriza`, `/oracion`, `/devocional` y la cola post-`/procrastinacion`
+setean `pendingFlowDraft` con metadata y entran al dispatcher `flowStep`
+existente. Cero capabilities nuevas — patrón canónico reutilizado.
+
+**Copy de Eisenhower** también ajustado en el mismo sprint: ahora muestra
+explícitamente el rank de cada opción (`ALTA`, `MÁXIMA`, `media-baja`,
+`Puede esperar`) para que la intuición del usuario coincida con la
+priorización real.
+
+**Tests:** 15 nuevos en `test/sprint-0.5.test.ts` cubriendo path feliz,
+respuesta natural, re-prompt con estado preservado, y los criterios del
+contrato por handler.
 
 ## Estado actual
 
 Fase 4.3 completa (neuro-reset, procrastinación, TCC, espiritualidad,
-Eisenhower). 323 tests jest + walkthrough humano de 127 casos. Producto
-funcional en Railway. La base necesita disciplina antes de Fase 5.
+Eisenhower). Sprint 0 completo (S0.1-S0.6: fix `/borrar`, CI Postgres,
+logger redact, índices, TTL, hygiene). **Sprint 0.5 completo** (clase
+"pending_input ignorado", 6 handlers reescritos + copy Eisenhower
+explícito). **348 tests jest + 15 skipped Postgres. Producto desplegado
+en Railway en commit `129962f` (Sprint 0); Sprint 0.5 pendiente de push.**
