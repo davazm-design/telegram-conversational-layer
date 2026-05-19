@@ -1738,9 +1738,9 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
       case 'delete_all_state':
         return await this.deleteAllState(userId);
       case 'anti_abandono':
-        return this.antiAbandono();
+        return await this.antiAbandono(userId);
       case 'restart_no_guilt':
-        return this.restartNoGuilt();
+        return await this.restartNoGuilt(userId);
       case 'agenda_start':
         return await this.agendaStart(userId);
       case 'agenda_classify':
@@ -1787,9 +1787,9 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
         return await this.flowStep(userId, params);
       // ── Fase 4D ──
       case 'christian_prayer':
-        return this.christianPrayer();
+        return await this.christianPrayer(userId);
       case 'christian_devotional':
-        return this.christianDevotional();
+        return await this.christianDevotional(userId);
       case 'spiritual_mode':
         return await this.spiritualMode(userId);
       case 'neuro_or_faith_offer':
@@ -2195,22 +2195,430 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
     };
   }
 
-  private antiAbandono(): ActionResult {
+  // ─── /abandonar (Sprint 0.5) ─────────────────────────────────────────────
+  // Dos turnos. Turno 1: diagnóstico abierto (palabra). Turno 2: A/B/C
+  // contextual al diagnóstico. Ver docs/contracts/sprint-0.5-pending-input.md.
+  private async antiAbandono(userId: string): Promise<ActionResult> {
+    await this.store.setPendingFlowDraft(userId, {
+      flow: 'abandon', step: 1, answers: [],
+    });
     return {
       success: true,
       message:
-        'Antes de abandonar, hagamos una pausa. ¿Esto es cansancio, miedo, frustración o que realmente ya no tiene sentido? ' +
-        'Luego eliges: A) 2 minutos, B) reprogramar, C) cerrar conscientemente.',
+        'Antes de abandonar, hagamos una pausa.\n\n' +
+        '¿Qué se parece más a lo que sientes? Puedes contestar con una palabra:\n' +
+        'cansancio, miedo, frustración, o "ya no tiene sentido".',
+      pendingInput: {
+        action: 'flow_step',
+        paramName: 'answer',
+        prompt: 'cansancio, miedo, frustración o "ya no tiene sentido"',
+      },
     };
   }
 
-  private restartNoGuilt(): ActionResult {
+  // ─── /reinicio (Sprint 0.5) ──────────────────────────────────────────────
+  // Tres turnos: prioridad → acción de 2 min → cierre. Ver contrato.
+  private async restartNoGuilt(userId: string): Promise<ActionResult> {
+    await this.store.setPendingFlowDraft(userId, {
+      flow: 'restart_no_guilt', step: 1, answers: [],
+    });
     return {
       success: true,
       message:
-        'Romper una racha no borra lo aprendido. Hoy reinicio mínimo: una prioridad, una acción de 2 minutos y cierre. ' +
-        '¿Cuál es la prioridad?',
+        'Romper una racha no borra lo aprendido. Hagamos un reinicio mínimo: ' +
+        'una prioridad, una acción de 2 minutos y cierre.\n\n' +
+        '¿Cuál es la prioridad de hoy? Una frase basta.',
+      pendingInput: {
+        action: 'flow_step',
+        paramName: 'answer',
+        prompt: '¿Cuál es la prioridad?',
+      },
     };
+  }
+
+  // ─── Diagnóstico de /abandonar — palabras → categoría canónica ───────────
+  private parseAbandonDiagnosis(answer: string): string | null {
+    const a = stripAccentsLower(answer);
+    if (/^a\b|cansancio|cansad[oa]|fatig|agotad|no\s+puedo\s+mas/.test(a)) return 'cansancio';
+    if (/^b\b|miedo|temor|pavor|asust|nervios/.test(a)) return 'miedo';
+    if (/^c\b|frustr|enojad|enoj|coraj|hart|harto|harta|molest/.test(a)) return 'frustracion';
+    if (/^d\b|sin sentido|no tiene sentido|para que|porque|ya no vale|no vale/.test(a)) return 'sin_sentido';
+    return null;
+  }
+
+  // Copy del turno 2 de /abandonar — depende del diagnóstico del turno 1.
+  private abandonFollowUpPrompt(diagnosis: string): { message: string; shortPrompt: string } {
+    switch (diagnosis) {
+      case 'cansancio':
+        return {
+          message:
+            'Cansancio escuchado. No vamos a forzar.\n\n' +
+            'A) pausa de 2 minutos (respiración + agua)\n' +
+            'B) reprograma esto para más tarde\n' +
+            'C) cierra el día conscientemente',
+          shortPrompt: 'A, B o C',
+        };
+      case 'miedo':
+        return {
+          message:
+            'Miedo escuchado. No es debilidad — es información.\n\n' +
+            'A) pausa de 2 minutos para regular el cuerpo\n' +
+            'B) reprogramar y volver con plan más claro\n' +
+            'C) /tcc breve para mirar el miedo de frente',
+          shortPrompt: 'A, B o C',
+        };
+      case 'frustracion':
+        return {
+          message:
+            'Frustración escuchada. Es señal real, no defecto.\n\n' +
+            'A) /reencuadre rápido\n' +
+            'B) 2 minutos de aire antes de decidir\n' +
+            'C) cerrar conscientemente y volver mañana',
+          shortPrompt: 'A, B o C',
+        };
+      case 'sin_sentido':
+        return {
+          message:
+            'Eso pesa distinto a cansancio o frustración. Vamos despacio.\n\n' +
+            'A) revisar por qué esta tarea estaba en tu lista\n' +
+            'B) eliminarla limpiamente y soltar\n' +
+            'C) hablarlo conmigo en /tcc o /espiritual',
+          shortPrompt: 'A, B o C',
+        };
+      default:
+        return {
+          message: 'A) 2 min, B) reprogramar, C) cerrar',
+          shortPrompt: 'A, B o C',
+        };
+    }
+  }
+
+  // Parser del turno 2 — acepta letra A/B/C o palabra clave por diagnóstico.
+  private parseAbandonChoice(diagnosis: string, answer: string): 'A' | 'B' | 'C' | null {
+    const a = stripAccentsLower(answer);
+    const letter = a.match(/^([abc])\b/)?.[1]
+      ?? a.match(/^([abc])[\).,]/)?.[1]
+      ?? '';
+    if (letter) return letter.toUpperCase() as 'A' | 'B' | 'C';
+
+    // Palabras clave por opción y diagnóstico
+    if (/pausa|respir|agua|2\s*min/.test(a)) return 'A';
+    if (/reprogram|mas tarde|despues/.test(a)) return 'B';
+    if (/cerrar|cierro|cerrar.*dia|terminar.*dia/.test(a)) return 'C';
+    if (diagnosis === 'miedo' && /tcc/.test(a)) return 'C';
+    if (diagnosis === 'frustracion' && /reencuadre/.test(a)) return 'A';
+    if (diagnosis === 'sin_sentido' && /revisar/.test(a)) return 'A';
+    if (diagnosis === 'sin_sentido' && /eliminar/.test(a)) return 'B';
+    if (diagnosis === 'sin_sentido' && /hablar|espiritual/.test(a)) return 'C';
+    return null;
+  }
+
+  // Mensaje de cierre del flujo /abandonar — combina diagnóstico × elección.
+  private abandonClosingMessage(diagnosis: string, choice: 'A' | 'B' | 'C'): string {
+    // 12 combinaciones; reduzco a 3 patrones de cierre por elección.
+    if (choice === 'A') {
+      switch (diagnosis) {
+        case 'cansancio':
+          return '🤲 Pausa de 2 min. Respira lento 4-6, toma agua, suelta hombros. Cuando vuelvas escribe /focus.';
+        case 'miedo':
+          return '🤲 Pausa breve. Cierra los ojos 30 seg, exhala lento, planta los pies. Vuelve cuando puedas.';
+        case 'frustracion':
+          return 'Abre /reencuadre para mirar la situación desde otro ángulo. Es 2-3 min.';
+        case 'sin_sentido':
+          return 'Bien. Revisemos: ¿qué te llevó a poner esa tarea en tu lista? Anótalo aquí cuando quieras y lo trabajamos.';
+      }
+    }
+    if (choice === 'B') {
+      switch (diagnosis) {
+        case 'cansancio':
+        case 'miedo':
+          return 'Reprogramada. Cuando vuelvas, /agenda o /prioriza lo retoman.';
+        case 'frustracion':
+          return 'Toma 2 minutos de aire (sin pantalla). Cuando vuelvas, escribe lo que sentías y lo trabajamos.';
+        case 'sin_sentido':
+          return 'Soltarla está bien. Si quieres borrarla concretamente: /focus → /borrar N.';
+      }
+    }
+    // C
+    switch (diagnosis) {
+      case 'cansancio':
+      case 'frustracion':
+        return 'Cerrando el día conscientemente. Mañana hay más espacio. /reinicio te ayuda a empezar limpio.';
+      case 'miedo':
+        return 'Abre /tcc para mirar el miedo sin que te empuje. Es un flujo breve.';
+      case 'sin_sentido':
+        return 'Hablémoslo. /tcc para enfoque psicológico o /espiritual para sentido más amplio.';
+    }
+    return 'Anotado. Cuando vuelvas, escribe /focus o /agenda.';
+  }
+
+  // Step handler del flujo /abandonar — llamado desde flowStep cuando
+  // draft.flow === 'abandon'.
+  private async abandonStep(
+    userId: string,
+    answer: string,
+    draft: { flow: string; step: number; answers: string[] },
+  ): Promise<ActionResult> {
+    if (draft.step === 1) {
+      const diagnosis = this.parseAbandonDiagnosis(answer);
+      if (!diagnosis) {
+        return {
+          success: false,
+          message:
+            '⚠️ No alcancé a leerte. ¿Es más bien cansancio, miedo, frustración ' +
+            'o que ya no tiene sentido? Una palabra basta.',
+          pendingInput: {
+            action: 'flow_step', paramName: 'answer',
+            prompt: 'cansancio, miedo, frustración o "ya no tiene sentido"',
+          },
+        };
+      }
+      await this.store.setPendingFlowDraft(userId, {
+        flow: 'abandon', step: 2, answers: [diagnosis],
+      });
+      const follow = this.abandonFollowUpPrompt(diagnosis);
+      return {
+        success: true,
+        message: follow.message,
+        pendingInput: {
+          action: 'flow_step', paramName: 'answer', prompt: follow.shortPrompt,
+        },
+      };
+    }
+    // Step 2
+    const diagnosis = draft.answers[0] ?? 'cansancio';
+    const choice = this.parseAbandonChoice(diagnosis, answer);
+    if (!choice) {
+      const follow = this.abandonFollowUpPrompt(diagnosis);
+      return {
+        success: false,
+        message: '⚠️ Responde con A, B o C (o con la palabra de la opción).\n\n' + follow.message,
+        pendingInput: {
+          action: 'flow_step', paramName: 'answer', prompt: follow.shortPrompt,
+        },
+      };
+    }
+    await this.store.clearPendingFlowDraft(userId);
+    await this.store.addJournalEntry(
+      userId, 'abandon_diagnosis',
+      JSON.stringify({ diagnosis, choice, at: new Date().toISOString() }),
+    );
+    return { success: true, message: this.abandonClosingMessage(diagnosis, choice) };
+  }
+
+  // Step handler del flujo /reinicio — tres turnos: prioridad → acción 2min → cierre.
+  private async restartStep(
+    userId: string,
+    answer: string,
+    draft: { flow: string; step: number; answers: string[] },
+  ): Promise<ActionResult> {
+    if (draft.step === 1) {
+      // Turno 1: prioridad. Acepta cualquier texto razonable.
+      const priority = answer.trim();
+      if (priority.length < 2) {
+        return {
+          success: false,
+          message: '⚠️ Necesito una frase para la prioridad. Una línea está bien.',
+          pendingInput: {
+            action: 'flow_step', paramName: 'answer', prompt: '¿Cuál es la prioridad?',
+          },
+        };
+      }
+      await this.store.setPendingFlowDraft(userId, {
+        flow: 'restart_no_guilt', step: 2, answers: [priority],
+      });
+      return {
+        success: true,
+        message:
+          `Anotado: "${escapeMdV1(priority)}".\n\n` +
+          '¿Cuál es UNA acción de 2 minutos que te acerque a esa prioridad?',
+        pendingInput: {
+          action: 'flow_step', paramName: 'answer',
+          prompt: '¿Una acción de 2 minutos?',
+        },
+      };
+    }
+    if (draft.step === 2) {
+      const action = answer.trim();
+      if (action.length < 2) {
+        return {
+          success: false,
+          message: '⚠️ Una acción concreta, en una línea. Ej: "abrir el documento" o "escribir el primer párrafo".',
+          pendingInput: {
+            action: 'flow_step', paramName: 'answer', prompt: '¿Una acción de 2 minutos?',
+          },
+        };
+      }
+      // Si trae marcador de tiempo, ofrecer crear recordatorio (no lo
+      // creamos automáticamente — preguntamos primero, conservando contrato
+      // de "no acción destructiva sin confirmar").
+      const hasTimeMarker = /\b(en|hace|hoy|mañana|manana|al|a las)\s+\d|\b\d+\s*(min|minutos?|h|horas?)\b/i
+        .test(action);
+      await this.store.setPendingFlowDraft(userId, {
+        flow: 'restart_no_guilt', step: 3,
+        answers: [...draft.answers, action],
+        metadata: { hasTime: hasTimeMarker ? '1' : '0' },
+      });
+      const reminderHint = hasTimeMarker
+        ? '\n\n💡 Vi un marcador de tiempo. Si quieres, después usa /recordar para fijarlo.'
+        : '';
+      return {
+        success: true,
+        message:
+          `Acción anotada: "${escapeMdV1(action)}".${reminderHint}\n\n` +
+          '¿Cómo cierras este reinicio? Una frase: qué vas a hacer ahora o cuándo retomas.',
+        pendingInput: {
+          action: 'flow_step', paramName: 'answer', prompt: '¿Cierre?',
+        },
+      };
+    }
+    // Step 3: cierre
+    const closing = answer.trim();
+    if (closing.length < 2) {
+      return {
+        success: false,
+        message: '⚠️ Una frase breve de cierre. Ej: "voy a empezar ya" o "vuelvo en una hora".',
+        pendingInput: {
+          action: 'flow_step', paramName: 'answer', prompt: '¿Cierre?',
+        },
+      };
+    }
+    const [priority, action] = draft.answers;
+    await this.store.clearPendingFlowDraft(userId);
+    await this.store.addJournalEntry(
+      userId, 'restart_no_guilt',
+      JSON.stringify({ priority, action, closing, at: new Date().toISOString() }),
+    );
+    return {
+      success: true,
+      message: [
+        '✅ Reinicio mínimo registrado:',
+        `• Prioridad: ${escapeMdV1(priority)}`,
+        `• Acción 2 min: ${escapeMdV1(action)}`,
+        `• Cierre: ${escapeMdV1(closing)}`,
+        '',
+        'Cuando estés, /focus o /prioriza retoman.',
+      ].join('\n'),
+    };
+  }
+
+  // Step handler de la cola de /prioriza — captura el "primer paso pequeño"
+  // de la siguiente acción. Si trae marcador de tiempo, ofrece recordatorio.
+  private async captureFirstStepFlow(
+    userId: string,
+    answer: string,
+    draft: { flow: string; step: number; answers: string[]; metadata?: Record<string, string> },
+  ): Promise<ActionResult> {
+    const step = answer.trim();
+    if (step.length < 2) {
+      return {
+        success: false,
+        message: '⚠️ Una frase breve para el primer paso.',
+        pendingInput: {
+          action: 'flow_step', paramName: 'answer', prompt: '¿Cuál sería un primer paso pequeño?',
+        },
+      };
+    }
+    const taskId = draft.metadata?.taskId ?? '';
+    const taskText = draft.metadata?.taskText ?? '';
+    await this.store.clearPendingFlowDraft(userId);
+    await this.store.addJournalEntry(
+      userId, 'first_step',
+      JSON.stringify({ taskId, taskText, step, at: new Date().toISOString() }),
+    );
+    // Si la respuesta huele a recordatorio, sugerir crearlo.
+    const looksLikeReminder = /\b(en|al|a las|hoy|mañana|manana)\s+(\d|media|cuarto|una|dos|tres)/i
+      .test(step) || /\b\d+\s*(min|minutos?|h|horas?)\b/i.test(step);
+    if (looksLikeReminder) {
+      return {
+        success: true,
+        message:
+          `Anotado como primer paso de "${escapeMdV1(taskText || 'tu tarea')}":\n` +
+          `"${escapeMdV1(step)}"\n\n` +
+          '💡 Esto parece un recordatorio. Si quieres que te avise, escribe:\n' +
+          `/recordar ${escapeMdV1(step)}`,
+      };
+    }
+    return {
+      success: true,
+      message:
+        `Anotado como primer paso de "${escapeMdV1(taskText || 'tu tarea')}":\n` +
+        `"${escapeMdV1(step)}"\n\n` +
+        '¿Empiezas con eso? Cuando termines, /focus actualiza tu lista.',
+    };
+  }
+
+  // Step handler para la cola de /oracion y /devocional — captura la
+  // acción espiritual concreta que el usuario nombró.
+  private async captureSpiritualActionFlow(
+    userId: string,
+    answer: string,
+    draft: { flow: string; step: number; answers: string[] },
+  ): Promise<ActionResult> {
+    const action = answer.trim();
+    if (action.length < 2) {
+      return {
+        success: false,
+        message: '⚠️ Una frase está bien.',
+        pendingInput: {
+          action: 'flow_step', paramName: 'answer', prompt: '¿Cuál es la siguiente acción pequeña?',
+        },
+      };
+    }
+    const journalType = draft.flow === 'capture_devotional_action' ? 'devotional_action' : 'spiritual_action';
+    await this.store.clearPendingFlowDraft(userId);
+    await this.store.addJournalEntry(
+      userId, journalType,
+      JSON.stringify({ action, at: new Date().toISOString() }),
+    );
+    return {
+      success: true,
+      message: `🙏 Anotado: "${escapeMdV1(action)}". Si quieres convertirlo en micro-tarea, "microtarea: ${escapeMdV1(action)}".`,
+    };
+  }
+
+  // Step handler para las opciones A/B/C/D después de /procrastinacion.
+  private async avoidanceChoiceStep(
+    userId: string,
+    answer: string,
+    draft: { flow: string; step: number; answers: string[]; metadata?: Record<string, string> },
+  ): Promise<ActionResult> {
+    const a = stripAccentsLower(answer);
+    const letter = a.match(/^([abcd])\b/)?.[1]
+      ?? a.match(/^([abcd])[\).,]/)?.[1]
+      ?? '';
+    let choice: 'A' | 'B' | 'C' | 'D' | '' = (letter ? letter.toUpperCase() : '') as any;
+    if (!choice) {
+      if (/abrir|abre|abrelo|archivo/.test(a)) choice = 'A';
+      else if (/imperfect|escribir|primera linea/.test(a)) choice = 'B';
+      else if (/temporizador|2\s*min|cronometr/.test(a)) choice = 'C';
+      else if (/ayuda|aclarar|preguntar/.test(a)) choice = 'D';
+    }
+    if (!choice) {
+      return {
+        success: false,
+        message:
+          '⚠️ Responde con A, B, C o D (o la palabra de la opción).\n\n' +
+          'A) abrir el archivo\nB) escribir una línea imperfecta\n' +
+          'C) poner temporizador de 2 minutos\nD) pedir ayuda o aclarar el siguiente paso',
+        pendingInput: {
+          action: 'flow_step', paramName: 'answer', prompt: 'A, B, C o D',
+        },
+      };
+    }
+    const task = draft.metadata?.task ?? '';
+    await this.store.clearPendingFlowDraft(userId);
+    await this.store.addJournalEntry(
+      userId, 'avoidance_choice',
+      JSON.stringify({ task, choice, at: new Date().toISOString() }),
+    );
+    const replies: Record<'A' | 'B' | 'C' | 'D', string> = {
+      A: `Abre el archivo. No tienes que hacer nada más. Cuando esté abierto, /focus.`,
+      B: `Escribe una línea imperfecta. Mala, fea, la que sea. Cuando lo hagas, /focus.`,
+      C: `Pon temporizador 2 min con /recordar en 2 min revisar "${escapeMdV1(task || 'la tarea')}". Empieza al sonar.`,
+      D: `Para aclarar el siguiente paso, prueba /tcc o /reencuadre. Si necesitas ayuda concreta, descríbela.`,
+    };
+    return { success: true, message: replies[choice as 'A' | 'B' | 'C' | 'D'] };
   }
 
   // ─── /agenda (refactor Fase 3): flujo conversacional 4 pasos ────────────
@@ -2870,7 +3278,19 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
       'C) poner temporizador de 2 minutos',
       'D) pedir ayuda o aclarar el siguiente paso',
     ].join('\n');
-    return { success: true, message };
+    // S0.5: la elección A/B/C/D ya NO es huérfana. Guardamos la tarea
+    // evitada en metadata para que el handler de cola pueda usarla.
+    await this.store.setPendingFlowDraft(userId, {
+      flow: 'avoidance_choice', step: 1, answers: [],
+      metadata: { task },
+    });
+    return {
+      success: true,
+      message,
+      pendingInput: {
+        action: 'flow_step', paramName: 'answer', prompt: 'A, B, C o D',
+      },
+    };
   }
 
   // ─── Fase 4C: TCC — flujo multi-paso genérico ───────────────────────────
@@ -2973,6 +3393,22 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
     if (draft.flow === 'neuro_or_faith') {
       await this.store.clearPendingFlowDraft(userId);
       return this.resolveNeuroOrFaith(answer);
+    }
+    // ── Sprint 0.5: flujos que antes eran fachadas vacías ───────────────
+    if (draft.flow === 'abandon') {
+      return this.abandonStep(userId, answer, draft);
+    }
+    if (draft.flow === 'restart_no_guilt') {
+      return this.restartStep(userId, answer, draft);
+    }
+    if (draft.flow === 'capture_first_step') {
+      return this.captureFirstStepFlow(userId, answer, draft);
+    }
+    if (draft.flow === 'capture_spiritual_action' || draft.flow === 'capture_devotional_action') {
+      return this.captureSpiritualActionFlow(userId, answer, draft);
+    }
+    if (draft.flow === 'avoidance_choice') {
+      return this.avoidanceChoiceStep(userId, answer, draft);
     }
 
     // Flujos TCC multi-paso.
@@ -3120,7 +3556,7 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
 
   // ─── Fase 4D: espiritualidad cristiana ──────────────────────────────────
 
-  private christianPrayer(): ActionResult {
+  private async christianPrayer(userId: string): Promise<ActionResult> {
     const message = [
       'Claro. Oramos breve:',
       '',
@@ -3130,10 +3566,22 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
       '',
       'Ahora dime: ¿cuál es la siguiente acción pequeña?',
     ].join('\n');
-    return { success: true, message };
+    // S0.5: la pregunta de cola ya tiene pendingInput. La respuesta queda
+    // como journal entry y, si parece tarea, se sugiere convertirla.
+    await this.store.setPendingFlowDraft(userId, {
+      flow: 'capture_spiritual_action', step: 1, answers: [],
+    });
+    return {
+      success: true,
+      message,
+      pendingInput: {
+        action: 'flow_step', paramName: 'answer',
+        prompt: '¿Cuál es la siguiente acción pequeña?',
+      },
+    };
   }
 
-  private christianDevotional(): ActionResult {
+  private async christianDevotional(userId: string): Promise<ActionResult> {
     const message = [
       'Verdad: no necesitas resolver toda tu vida para obedecer en el siguiente paso.',
       '',
@@ -3143,7 +3591,19 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
       '',
       'Oración: Señor, ayúdame a ser fiel en lo pequeño. Amén.',
     ].join('\n');
-    return { success: true, message };
+    // S0.5: la pregunta intermedia queda viva — la respuesta del usuario
+    // se captura como acto de fidelidad concreto.
+    await this.store.setPendingFlowDraft(userId, {
+      flow: 'capture_devotional_action', step: 1, answers: [],
+    });
+    return {
+      success: true,
+      message,
+      pendingInput: {
+        action: 'flow_step', paramName: 'answer',
+        prompt: '¿Qué pequeño acto de fidelidad está delante de ti?',
+      },
+    };
   }
 
   private async spiritualMode(userId: string): Promise<ActionResult> {
@@ -3246,13 +3706,17 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
   }
 
   private prioritizationPrompt(taskText: string, position: number, total: number): string {
+    // S0.5: copy explícito sobre la prioridad RESULTANTE de cada opción.
+    // Antes "Urgente" sonaba alto pero el sistema lo ponía 3o; el copy
+    // ocultaba la lógica Eisenhower (importante > urgente porque urgente
+    // sin importante = ruido) y producía disonancia.
     return [
       `Para "${escapeMdV1(taskText)}" (${position}/${total}):`,
       '',
-      'A) Urgente (vence hoy/mañana)',
-      'B) Importante (te acerca a una meta)',
-      'C) Ambas',
-      'D) Puede esperar',
+      'A) Urgente y poco profundo (vence pronto pero no mueve la aguja) → prioridad media-baja',
+      'B) Importante (te acerca a una meta de verdad) → prioridad ALTA',
+      'C) Ambas (urgente E importante) → prioridad MÁXIMA, va primero',
+      'D) Ni urgente ni importante → Puede esperar',
     ].join('\n');
   }
 
@@ -3361,6 +3825,13 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
     });
     const next = sorted[0];
     const label = AdhdCoachDomainHandler.PRIORITY_LABEL[next.priority ?? 'later'] ?? next.priority;
+    // S0.5: la pregunta de cola ya NO es huérfana. Setea pendingFlowDraft
+    // con el taskId+texto en metadata para que captureFirstStepFlow pueda
+    // referenciar la tarea concreta sobre la que se pidió el primer paso.
+    await this.store.setPendingFlowDraft(userId, {
+      flow: 'capture_first_step', step: 1, answers: [],
+      metadata: { taskId: next.id, taskText: next.text },
+    });
     return {
       success: true,
       message: [
@@ -3370,6 +3841,10 @@ export class AdhdCoachDomainHandler implements IDomainHandler {
         '',
         '¿Cuál sería un primer paso pequeño?',
       ].join('\n'),
+      pendingInput: {
+        action: 'flow_step', paramName: 'answer',
+        prompt: '¿Cuál sería un primer paso pequeño?',
+      },
     };
   }
 

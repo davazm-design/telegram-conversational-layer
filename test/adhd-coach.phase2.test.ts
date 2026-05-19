@@ -171,13 +171,14 @@ describe('adhd-coach Fase 2 — capabilities nuevas', () => {
     expect(await storage.adhdCoachStore.getSilenceUntil('phase2-user')).toBeNull();
   });
 
-  // 6) /abandonar activa anti-abandono
-  test('/abandonar activa anti-abandono', async () => {
+  // 6) /abandonar activa anti-abandono (S0.5: turno 1 pide diagnóstico)
+  test('/abandonar pide el diagnóstico primero (S0.5)', async () => {
     await adapter.receive('/abandonar');
     expect(lastReply()).toContain('Antes de abandonar, hagamos una pausa');
-    expect(lastReply()).toContain('A) 2 minutos');
-    expect(lastReply()).toContain('B) reprogramar');
-    expect(lastReply()).toContain('C) cerrar conscientemente');
+    // Turno 1: bot lista palabras de diagnóstico, NO letras A/B/C todavía.
+    expect(lastReply()).toMatch(/cansancio/);
+    expect(lastReply()).toMatch(/miedo/);
+    expect(lastReply()).toMatch(/frustraci[oó]n/);
   });
 
   // 7) "me rindo" (NL) activa anti-abandono
